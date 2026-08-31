@@ -101,15 +101,21 @@ export function _resetRebuildRecord(): void {
   statsCache = null
   previousEmbeddingPrerequisite = null
   pendingEmbeddingReconciliation = false
+  pendingChangeLog = null
 }
 
 // --- Change log for rebuild consistency ---
 
+type FilterUpdate = { id: number; is_unread?: boolean; is_liked?: boolean; is_bookmarked?: boolean }
+
 type ChangeEntry =
   | { action: 'upsert'; id: number; doc: MeiliArticleDoc }
   | { action: 'delete'; id: number }
+  | { action: 'score'; id: number; score: number }
+  | { action: 'filters'; update: FilterUpdate }
 
 let changeLog: ChangeEntry[] | null = null
+let pendingChangeLog: ChangeEntry[] | null = null
 
 // --- Index settings ---
 
@@ -152,6 +158,7 @@ export async function rebuildSearchIndex(): Promise<void> {
   }
   rebuilding = true
   liveEmbedderVerified = false
+  pendingChangeLog = null
   changeLog = []
   const config = getEmbeddingConfig()
   const embedderPlanned = !!buildEmbeddersSettings(config) && isEmbeddingPrerequisiteMet()
@@ -166,6 +173,7 @@ export async function rebuildSearchIndex(): Promise<void> {
     totalDocuments: null,
   }
 
+  let productionSwapped = false
   try {
     const client = getSearchClient()
     const startedAt = Date.now()
@@ -231,6 +239,7 @@ export async function rebuildSearchIndex(): Promise<void> {
       await client.swapIndexes([
         { indexes: [ARTICLES_INDEX, ARTICLES_STAGING_INDEX] } as any,
       ]).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+      productionSwapped = true
       await client.deleteIndex(ARTICLES_STAGING_INDEX).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
     } else {
       // First run: no existing articles index — create empty one for swap
@@ -238,29 +247,38 @@ export async function rebuildSearchIndex(): Promise<void> {
       await client.swapIndexes([
         { indexes: [ARTICLES_INDEX, ARTICLES_STAGING_INDEX] } as any,
       ]).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+      productionSwapped = true
       await client.deleteIndex(ARTICLES_STAGING_INDEX).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
     }
+
+    liveEmbedderVerified = embedderPlanned ? await verifyLiveEmbedder() : false
 
     // 5. Replay change log
     if (changeLog && changeLog.length > 0) {
       const prodIndex = client.index(ARTICLES_INDEX)
-      const upserts = changeLog.filter((e): e is Extract<ChangeEntry, { action: 'upsert' }> => e.action === 'upsert')
-      const deletes = changeLog.filter((e): e is Extract<ChangeEntry, { action: 'delete' }> => e.action === 'delete')
-
-      if (upserts.length > 0) {
-        const task = await prodIndex.addDocuments(upserts.map((e) => e.doc)).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
-        if (task && task.status === 'failed') {
-          const message = task.error?.message || `replay document task ${task.uid} failed`
-          throw new Error(`Meilisearch replay indexing failed: ${message}`)
+      for (const entry of changeLog) {
+        if (entry.action === 'upsert') {
+          const task = await prodIndex.addDocuments([entry.doc]).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+          if (task && task.status === 'failed') {
+            const message = task.error?.message || `replay document task ${task.uid} failed`
+            throw new Error(`Meilisearch replay indexing failed: ${message}`)
+          }
+        } else if (entry.action === 'delete') {
+          await prodIndex.deleteDocument(entry.id)
+        } else {
+          const update = entry.action === 'score'
+            ? { id: entry.id, score: entry.score }
+            : entry.update
+          const task = await prodIndex.updateDocuments([update]).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+          if (task && task.status === 'failed') {
+            const message = task.error?.message || `replay ${entry.action} task ${task.uid} failed`
+            throw new Error(`Meilisearch replay indexing failed: ${message}`)
+          }
         }
-      }
-      for (const del of deletes) {
-        await prodIndex.deleteDocument(del.id)
       }
     }
 
     searchReady = true
-    liveEmbedderVerified = embedderPlanned ? await verifyLiveEmbedder() : false
     lastRebuild = {
       ...lastRebuild!,
       finishedAt: Date.now(),
@@ -274,7 +292,11 @@ export async function rebuildSearchIndex(): Promise<void> {
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1)
     log.info(`Index rebuild complete: ${docs.length} articles in ${elapsed}s${embedderPlanned ? ' (embeddings enabled)' : ''}`)
   } catch (err) {
-    // On failure: keep searchReady as-is (true if previously built, false if first time)
+    if (productionSwapped) {
+      searchReady = false
+      liveEmbedderVerified = false
+      pendingChangeLog = changeLog ? [...changeLog] : []
+    }
     const rawMessage = err instanceof Error ? err.message : String(err)
     const secrets = [config.apiKey, getEmbeddingConfig().apiKey].filter((secret): secret is string => !!secret)
     const message = secrets.reduce((safe, secret) => safe.split(secret).join('[redacted]'), rawMessage)
@@ -291,8 +313,9 @@ export async function rebuildSearchIndex(): Promise<void> {
   } finally {
     changeLog = null
     rebuilding = false
-    const rerun = pendingEmbeddingReconciliation && getEmbeddingConfig().enabled && isEmbeddingPrerequisiteMet()
+    const rerun = pendingChangeLog !== null || (pendingEmbeddingReconciliation && getEmbeddingConfig().enabled && isEmbeddingPrerequisiteMet())
     pendingEmbeddingReconciliation = false
+    pendingChangeLog = null
     if (rerun) requestSearchRebuild()
   }
 }
@@ -530,12 +553,16 @@ export function syncArticleScoreToSearch(id: number, score: number): void {
     index.updateDocuments([{ id, score }]).catch((err) => {
       log.error('Failed to sync score:', err)
     })
+
+    if (changeLog) {
+      changeLog.push({ action: 'score', id, score })
+    }
   } catch (err) {
     log.error('Failed to sync score:', err)
   }
 }
 
-export function syncArticleFiltersToSearch(updates: { id: number; is_unread?: boolean; is_liked?: boolean; is_bookmarked?: boolean }[]): void {
+export function syncArticleFiltersToSearch(updates: FilterUpdate[]): void {
   if (updates.length === 0) return
   try {
     const client = getSearchClient()
@@ -543,6 +570,12 @@ export function syncArticleFiltersToSearch(updates: { id: number; is_unread?: bo
     index.updateDocuments(updates).catch((err) => {
       log.error('Failed to sync article filters:', err)
     })
+
+    if (changeLog) {
+      for (const update of updates) {
+        changeLog.push({ action: 'filters', update: { ...update } })
+      }
+    }
   } catch (err) {
     log.error('Failed to sync article filters:', err)
   }

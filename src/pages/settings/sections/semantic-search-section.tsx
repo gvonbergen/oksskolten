@@ -292,7 +292,10 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
                     onClick={() => {
                       setProvider(p)
                       const def = EMBEDDING_DEFAULT_MODELS[p]
-                      setModelInput(prev => (provider === p ? prev : prev || def))
+                      setModelInput(prev => {
+                        if (provider === p) return prev
+                        return EMBEDDING_MODELS[p].some(model => model.value === prev) ? prev : def
+                      })
                     }}
                     className={`flex-1 px-1.5 py-1 text-[11px] rounded transition-colors select-none ${
                       provider === p ? 'bg-accent text-accent-text font-medium shadow-sm' : 'text-muted hover:text-text'

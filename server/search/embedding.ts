@@ -205,11 +205,12 @@ export function isEmbeddingPrerequisiteMet(): boolean {
 /**
  * Compile the managed `embedders` settings object for the current config.
  * Returns null when embeddings are disabled or the config is not
- * actionable (no model selected), in which case the index must be
- * keyword-only — preserving today's behavior.
+ * actionable, in which case the index must be keyword-only — preserving
+ * today's behavior.
  */
 export function buildEmbeddersSettings(config: EmbeddingConfig): Embedders {
   if (!config.enabled || !config.provider || !config.model) return null
+  if (config.provider === 'openai' && !config.apiKey) return null
 
   const shared = {
     documentTemplate: EMBEDDING_TEMPLATE,
@@ -279,8 +280,7 @@ export function applyEmbeddingVectors<T extends { summary?: string | null; feed_
   doc: T,
   config: EmbeddingConfig = getEmbeddingConfig(),
 ): T & { _vectors?: Record<string, null> } {
-  const embeddingCredentialMissing = config.provider === 'openai' && !config.apiKey
-  if (!config.enabled || !config.provider || !config.model || embeddingCredentialMissing || !isEmbeddingPrerequisiteMet() || doc.feed_type === 'clip' || !doc.summary?.trim()) {
+  if (!buildEmbeddersSettings(config) || !isEmbeddingPrerequisiteMet() || doc.feed_type === 'clip' || !doc.summary?.trim()) {
     return { ...doc, _vectors: { [EMBEDDER_NAME]: null } }
   }
   return doc
@@ -349,6 +349,7 @@ export async function testEmbeddingConnection(config: EmbeddingConfig): Promise<
         method: 'POST',
         headers: openAiHeaders,
         body: JSON.stringify({ model: config.model, input: probe }),
+        redirect: 'error',
         signal: AbortSignal.timeout(10_000),
       })
       if (!res.ok) {
@@ -369,6 +370,7 @@ export async function testEmbeddingConnection(config: EmbeddingConfig): Promise<
         method: 'POST',
         headers,
         body: JSON.stringify({ model: config.model, input: probe }),
+        redirect: 'error',
         signal: AbortSignal.timeout(10_000),
       })
       if (!res.ok) {
