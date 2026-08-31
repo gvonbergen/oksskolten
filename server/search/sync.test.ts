@@ -287,6 +287,36 @@ describe('ensureSearchIndex', () => {
     expect(isSearchReady()).toBe(false)
   })
 
+  it('degrades to keyword-only search when the settings task fails deterministically', async () => {
+    // An invalid embedder configuration (e.g. unsupported dimensions for the
+    // model) makes the settings task fail on every retry. The production
+    // keyword index is intact, so startup must keep search available instead
+    // of throwing into the retry loop and 503-ing all search.
+    upsertSetting('summary.auto', 'on')
+    upsertSetting('summary.provider', 'openai')
+    upsertSetting('summary.model', 'gpt-4.1-mini')
+    upsertSetting('api_key.openai', 'sk-summary')
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.dimensions', '8192')
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockGetStats.mockResolvedValue({ numberOfDocuments: 42 })
+    mockWaitTask.mockResolvedValueOnce({ status: 'failed', error: { message: 'invalid dimensions' } })
+
+    await ensureSearchIndex()
+
+    expect(isSearchReady()).toBe(true)
+    expect(isSemanticReady()).toBe(false)
+    // Heavy rebuild operations must not cascade from the failed settings task.
+    expect(mockCreateIndex).not.toHaveBeenCalled()
+    expect(mockSwapIndexes).not.toHaveBeenCalled()
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild?.ok).toBe(false)
+    expect(runtime.lastRebuild?.error).toContain('production settings update failed')
+    expect(runtime.lastRebuild?.error).toContain('invalid dimensions')
+  })
+
   it('throws when the fallthrough rebuild fails so the startup retry loop can back off', async () => {
     // No indexes exist, so ensureSearchIndex must fall through to rebuild.
     // Make rebuildSearchIndex hit a hard failure that its internal catch

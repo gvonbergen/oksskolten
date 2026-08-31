@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { setupTestDb } from '../__tests__/helpers/testDb.js'
 import { buildApp } from '../__tests__/helpers/buildApp.js'
 import { upsertSetting, getSetting } from '../db.js'
@@ -250,26 +252,36 @@ describe('POST /api/settings/search-embedding/key', () => {
 })
 
 describe('POST /api/settings/search-embedding/test', () => {
-  const mockFetch = vi.fn()
+  // The probe runs through the pinned, redirect-validating request helper
+  // (node:http), so these tests exercise the real request path against a
+  // local HTTP server instead of stubbing global fetch.
+  let respond: (req: http.IncomingMessage, res: http.ServerResponse) => void
+  let server: http.Server
+  let baseUrl: string
 
   beforeEach(async () => {
     setupTestDb()
-    mockFetch.mockReset()
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: [{ embedding: new Array(1536).fill(0.1) }] }),
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ embedding: new Array(1536).fill(0.1) }] }))
+    }
+    server = http.createServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', c => chunks.push(c))
+      req.on('end', () => respond(req, res))
     })
-    vi.stubGlobal('fetch', mockFetch)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
     app = await buildApp()
   })
 
   afterEach(async () => {
-    vi.unstubAllGlobals()
     await app.close()
+    await new Promise<void>(resolve => server.close(() => resolve()))
   })
 
   it('validates connectivity and reports dimensions', async () => {
-    const res = await app.inject({ method: 'POST', url: '/api/settings/search-embedding/test', payload: { provider: 'openai', model: 'text-embedding-3-small', apiKey: 'sk-test' }, headers: json })
+    const res = await app.inject({ method: 'POST', url: '/api/settings/search-embedding/test', payload: { provider: 'openai', model: 'text-embedding-3-small', apiKey: 'sk-test', base_url: `${baseUrl}/v1` }, headers: json })
     expect(res.statusCode).toBe(200)
     expect(res.json().dimensions).toBe(1536)
   })
@@ -284,15 +296,14 @@ describe('POST /api/settings/search-embedding/test', () => {
   })
 
   it('redacts credentials echoed by an embedding endpoint', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 401,
-      text: async () => 'authorization Bearer sk-echoed-secret',
-    })
+    respond = (_req, res) => {
+      res.writeHead(401, { 'content-type': 'text/plain' })
+      res.end('authorization Bearer sk-echoed-secret')
+    }
     const res = await app.inject({
       method: 'POST',
       url: '/api/settings/search-embedding/test',
-      payload: { provider: 'openai', model: 'text-embedding-3-small', apiKey: 'sk-echoed-secret' },
+      payload: { provider: 'openai', model: 'text-embedding-3-small', apiKey: 'sk-echoed-secret', base_url: `${baseUrl}/v1` },
       headers: json,
     })
     expect(res.statusCode).toBe(400)

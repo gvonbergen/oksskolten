@@ -162,10 +162,12 @@ interface TaskLike {
  * fails, so every lifecycle task must have its final status checked before
  * the rebuild may proceed to the next step (or promote the staging index).
  */
+class TaskFailedError extends Error {}
+
 function assertTaskOk(task: TaskLike | null | undefined, what: string): void {
   if (task && task.status === 'failed') {
     const message = task.error?.message || `task ${task.uid ?? ''} failed`
-    throw new Error(`Meilisearch ${what} failed: ${message}`)
+    throw new TaskFailedError(`Meilisearch ${what} failed: ${message}`)
   }
 }
 
@@ -449,13 +451,37 @@ export async function ensureSearchIndex(): Promise<void> {
     const config = getEmbeddingConfig()
     const embedderPlanned = !!buildEmbeddersSettings(config) && isEmbeddingPrerequisiteMet()
     const startupEmbedders = embedderPlanned ? buildEmbeddersSettings(config) : {}
-    assertTaskOk(
-      await client.index(ARTICLES_INDEX).updateSettings({
-        ...resolveIndexSettings(config),
-        embedders: startupEmbedders,
-      }).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }),
-      'production settings update',
-    )
+    try {
+      assertTaskOk(
+        await client.index(ARTICLES_INDEX).updateSettings({
+          ...resolveIndexSettings(config),
+          embedders: startupEmbedders,
+        }).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }),
+        'production settings update',
+      )
+    } catch (err) {
+      // A rejected settings task fails deterministically (e.g. an invalid
+      // embedder model/dimensions combination that the PATCH API accepted):
+      // retrying cannot recover. The production index itself is intact, so
+      // keep keyword search available, mark semantic search unavailable, and
+      // surface the error through the rebuild record shown in the settings
+      // API instead of letting startup retries 503 all search.
+      if (!(err instanceof TaskFailedError)) throw err
+      const message = err.message
+      log.error('Production settings update failed; search degrades to keyword-only:', message)
+      searchReady = true
+      liveEmbedderVerified = false
+      lastRebuild = {
+        startedAt: Date.now(),
+        finishedAt: Date.now(),
+        ok: false,
+        error: message,
+        documents: populatedDocCount,
+        processedDocuments: 0,
+        totalDocuments: populatedDocCount,
+      }
+      return
+    }
     const liveEmbedderMatches = await verifyLiveEmbedder()
     searchReady = true
     const expectedCoverage = getExpectedSearchCoverage()

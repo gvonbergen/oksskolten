@@ -18,9 +18,14 @@ function ipv4Number(address: string): number | null {
 
 function ipv6Number(address: string): bigint | null {
   const embedded = address.toLowerCase().match(/(.*):((?:\d+\.){3}\d+)$/)
-  const expanded = embedded
-    ? `${embedded[1]}:${embedded[2].split('.').map(Number).reduce((value, part, index) => index % 2 === 0 ? value + `${Math.floor(part / 256).toString(16)}:` : value + `${(part % 256).toString(16)}${index === 3 ? '' : ':'}`, '')}`
-    : address.toLowerCase()
+  let expanded = address.toLowerCase()
+  if (embedded) {
+    // Each dotted part is a single byte; two bytes form one 16-bit hex group.
+    const bytes = embedded[2].split('.').map(Number)
+    if (bytes.length !== 4 || bytes.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return null
+    const groups = [0, 2].map(i => ((bytes[i] << 8) | bytes[i + 1]).toString(16).padStart(4, '0'))
+    expanded = `${embedded[1]}:${groups.join(':')}`
+  }
   const sections = expanded.split('::')
   if (sections.length > 2) return null
   const left = sections[0] ? sections[0].split(':') : []
@@ -133,6 +138,8 @@ interface SafeResponse {
   body: Buffer
 }
 
+const MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
 function requestPinned(url: URL, address: string, body: string, headers: Record<string, string>): Promise<SafeResponse> {
   const request = url.protocol === 'https:' ? https.request : http.request
   return new Promise((resolve, reject) => {
@@ -145,7 +152,15 @@ function requestPinned(url: URL, address: string, body: string, headers: Record<
       ...(url.protocol === 'https:' ? { servername: hostnameOf(url) } : {}),
     }, response => {
       const chunks: Buffer[] = []
-      response.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+      let received = 0
+      response.on('data', chunk => {
+        received += chunk.length
+        if (received > MAX_RESPONSE_BYTES) {
+          req.destroy(new Error(`Embedding endpoint response exceeded the ${MAX_RESPONSE_BYTES}-byte limit`))
+          return
+        }
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      })
       response.on('end', () => {
         const responseHeaders: Record<string, string> = {}
         for (const [key, value] of Object.entries(response.headers)) {
@@ -172,7 +187,25 @@ export async function safeEmbeddingRequest(
   let url = new URL(rawUrl)
   for (let attempt = 0; attempt <= MAX_REDIRECTS; attempt++) {
     const addresses = await safeAddresses(url)
-    const response = await requestPinned(url, addresses[0], body, headers)
+    // Every returned address has already been validated as safe, so trying
+    // them in order is purely an availability win: a host that publishes
+    // several safe addresses (e.g. localhost resolving to ::1 and 127.0.0.1
+    // while the service binds IPv4 only) must not fail on the first one.
+    let response: SafeResponse | null = null
+    let lastError: unknown = null
+    for (const address of addresses) {
+      try {
+        response = await requestPinned(url, address, body, headers)
+        break
+      } catch (err) {
+        lastError = err
+      }
+    }
+    if (!response) {
+      throw lastError instanceof Error
+        ? lastError
+        : new Error('Embedding endpoint request failed')
+    }
     if (!REDIRECT_STATUSES.has(response.statusCode)) return response
     const location = response.headers.location
     if (!location) throw new Error('Embedding endpoint redirect had no Location header')
