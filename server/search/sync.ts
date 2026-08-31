@@ -450,7 +450,18 @@ export async function rebuildSearchIndex(): Promise<void> {
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1)
     log.info(`Index rebuild complete: ${docs.length} articles in ${elapsed}s${embedderPlanned ? ' (embeddings enabled)' : ''}`)
   } catch (err) {
-    if (productionSwapped) {
+    if (productionSwapped && !swapPossiblyInFlight) {
+      // The swap task determinately committed: production already holds the
+      // complete fresh snapshot, so a post-swap failure (staging cleanup,
+      // partially failed replay) must not run the indeterminate-swap
+      // reconciliation. Keep search available on the committed snapshot and
+      // only preserve a non-empty change log (a replay that failed mid-way
+      // still needs its mutations replayed by the bounded retry).
+      searchReady = true
+      if (changeLog && changeLog.length > 0) {
+        pendingChangeLog = [...changeLog]
+      }
+    } else if (productionSwapped) {
       searchReady = false
       liveEmbedderVerified = false
       pendingChangeLog = changeLog ? [...changeLog] : []

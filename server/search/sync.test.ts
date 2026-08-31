@@ -572,6 +572,32 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask }))
   })
 
+  it('a post-swap failure after a committed swap does not arm indeterminate-swap retries', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/post-swap' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    _setSearchReady(true)
+    _setSwapRetryDelay(10)
+    // The swap determinately commits, then the staging cleanup task fails.
+    mockDeleteIndex.mockImplementationOnce(() => ({
+      waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'staging busy' } }),
+    }))
+
+    await rebuildSearchIndex()
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    // The promoted snapshot is complete and already live: no automatic full
+    // rebuild retries may run for a determinate post-swap failure.
+    expect(mockSwapIndexes).toHaveBeenCalledTimes(1)
+    expect(mockAddDocuments).toHaveBeenCalledTimes(1)
+    expect(isRebuilding()).toBe(false)
+    expect(isSearchReady()).toBe(true)
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild?.ok).toBe(false)
+    expect(runtime.lastRebuild?.error).toContain('staging index cleanup failed')
+  })
+
   it('a determinately failed swap task is not retried as indeterminate', async () => {
     seedEmbeddingSettings()
     const feedId = seedFeed()
