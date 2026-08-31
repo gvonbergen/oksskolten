@@ -36,7 +36,7 @@ vi.mock('./client.js', () => ({
   ARTICLES_STAGING_INDEX: 'articles_staging',
 }))
 
-import { ensureSearchIndex, isSearchReady, isSemanticReady, isRebuilding, syncAllScoredArticlesToSearch, syncArticlesByFeedToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, _setSwapRetryDelay, rebuildSearchIndex, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
+import { ensureSearchIndex, isSearchReady, isSemanticReady, isRebuilding, syncAllScoredArticlesToSearch, syncArticleFiltersToSearch, syncArticlesByFeedToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, _setSwapRetryDelay, rebuildSearchIndex, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
 import { upsertSetting, deleteSetting } from '../db.js'
 
 function seedFeed(): number {
@@ -532,6 +532,60 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     expect(isSearchReady()).toBe(true)
     const recovered = await getSearchIndexRuntime()
     expect(recovered.lastRebuild?.ok).toBe(true)
+  })
+
+  it('a determinately failed swap task is not retried as indeterminate', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/swap-failed' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    _setSearchReady(true)
+    mockSwapIndexes.mockReturnValueOnce({
+      waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'swap rejected' } }),
+    })
+
+    await rebuildSearchIndex()
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    // A failed swapIndexes task is atomic and never committed, so the
+    // indeterminate-swap retry chain (full rebuild + re-embedding) must not
+    // run for it.
+    expect(mockSwapIndexes).toHaveBeenCalledTimes(1)
+    expect(mockAddDocuments).toHaveBeenCalledTimes(1)
+    expect(isRebuilding()).toBe(false)
+    // The previous production index is intact and stays usable.
+    expect(isSearchReady()).toBe(true)
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild?.ok).toBe(false)
+    expect(runtime.lastRebuild?.error).toContain('staging swap failed')
+  })
+
+  it('an indeterminate-swap retry replays mutations captured while pending', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    const articleId = seedArticle(feedId, { url: 'https://example.com/liked-while-pending' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    // The sync helpers fire-and-forget (.catch), so the mock must return a
+    // thenable-ish object for the capture path to complete.
+    mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask, catch: vi.fn() }))
+    _setSwapRetryDelay(50)
+    mockSwapIndexes.mockReturnValueOnce({
+      waitTask: vi.fn().mockRejectedValue(new Error('MeiliSearchTaskTimeOutError: timeout')),
+    })
+
+    await rebuildSearchIndex()
+
+    // The retry is pending and still capturing: like the article now.
+    syncArticleFiltersToSearch([{ id: articleId, is_liked: true }])
+
+    // The retry rebuild promotes the new snapshot and replays the captured
+    // mutation onto production.
+    await vi.waitFor(() => expect(mockUpdateDocuments.mock.calls.length).toBeGreaterThanOrEqual(2))
+    const replayed = mockUpdateDocuments.mock.calls[1][0] as Record<string, unknown>[]
+    expect(replayed).toEqual([{ id: articleId, is_liked: true }])
+    const recovered = await getSearchIndexRuntime()
+    expect(recovered.lastRebuild?.ok).toBe(true)
+    mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask }))
   })
 
   it('stops after three automatic indeterminate-swap retries and requires a manual rebuild', async () => {

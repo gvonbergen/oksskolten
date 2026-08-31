@@ -68,6 +68,10 @@ function persistToken(token: string): void {
   }
 }
 
+export function getEmbeddingProxyToken(): string {
+  return resolveProxyToken()
+}
+
 export function getEmbeddingProxyUrl(): string {
   const base = (process.env.EMBEDDING_PROXY_URL || `http://localhost:${process.env.PORT || '3000'}/api/internal/embedding-proxy`).replace(/\/+$/, '')
   return `${base}/${encodeURIComponent(resolveProxyToken())}`
