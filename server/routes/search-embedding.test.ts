@@ -180,6 +180,15 @@ describe('PATCH /api/settings/search-embedding', () => {
     res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'ollama', base_url: 'http://localhost:11434' }, headers: json })
     expect(res.statusCode).toBe(200)
   })
+
+  it('validates a retained base URL when switching providers', async () => {
+    upsertSetting('embedding.provider', 'ollama')
+    upsertSetting('embedding.model', 'nomic-embed-text')
+    upsertSetting('embedding.base_url', 'http://ollama:11434')
+    const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'openai' }, headers: json })
+    expect(res.statusCode).toBe(400)
+    expect(getSetting('embedding.provider')).toBe('ollama')
+  })
 })
 
 describe('POST /api/settings/search-embedding/key', () => {
@@ -269,6 +278,23 @@ describe('POST /api/settings/search-embedding/test', () => {
     res = await app.inject({ method: 'POST', url: '/api/settings/search-embedding/test', payload: { provider: 'openai', model: 'text-embedding-3-small' }, headers: json })
     expect(res.statusCode).toBe(400)
     expect(res.json().error).toMatch(/API key/)
+  })
+
+  it('redacts credentials echoed by an embedding endpoint', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      text: async () => 'authorization Bearer sk-echoed-secret',
+    })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/settings/search-embedding/test',
+      payload: { provider: 'openai', model: 'text-embedding-3-small', apiKey: 'sk-echoed-secret' },
+      headers: json,
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.body).not.toContain('sk-echoed-secret')
+    expect(res.json().error).toContain('[redacted]')
   })
 })
 

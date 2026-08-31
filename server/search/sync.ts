@@ -133,8 +133,8 @@ export async function rebuildSearchIndex(): Promise<void> {
   liveEmbedderVerified = false
   changeLog = []
   const config = getEmbeddingConfig()
-  const settings = resolveIndexSettings(config)
-  const embedderPlanned = !!buildEmbeddersSettings(config)
+  const embedderPlanned = !!buildEmbeddersSettings(config) && isEmbeddingPrerequisiteMet()
+  const settings = embedderPlanned ? resolveIndexSettings(config) : { ...INDEX_SETTINGS }
   lastRebuild = {
     startedAt: Date.now(),
     finishedAt: null,
@@ -227,7 +227,11 @@ export async function rebuildSearchIndex(): Promise<void> {
       const deletes = changeLog.filter((e): e is Extract<ChangeEntry, { action: 'delete' }> => e.action === 'delete')
 
       if (upserts.length > 0) {
-        await prodIndex.addDocuments(upserts.map((e) => e.doc)).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+        const task = await prodIndex.addDocuments(upserts.map((e) => e.doc)).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+        if (task && task.status === 'failed') {
+          const message = task.error?.message || `replay document task ${task.uid} failed`
+          throw new Error(`Meilisearch replay indexing failed: ${message}`)
+        }
       }
       for (const del of deletes) {
         await prodIndex.deleteDocument(del.id)
@@ -343,9 +347,12 @@ export async function ensureSearchIndex(): Promise<void> {
     // to the startup retry loop instead so it backs off cleanly.
     const client = getSearchClient()
     const config = getEmbeddingConfig()
+    const startupEmbedders = buildEmbeddersSettings(config) && isEmbeddingPrerequisiteMet()
+      ? buildEmbeddersSettings(config)
+      : {}
     await client.index(ARTICLES_INDEX).updateSettings({
       ...resolveIndexSettings(config),
-      embedders: buildEmbeddersSettings(config) ?? {},
+      embedders: startupEmbedders,
     }).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
     const liveEmbedderMatches = await verifyLiveEmbedder()
     searchReady = true

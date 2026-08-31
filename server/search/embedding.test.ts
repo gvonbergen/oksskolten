@@ -80,6 +80,7 @@ describe('embedding config compiler', () => {
     expect(embedder.source).toBe('ollama')
     expect(embedder.model).toBe('nomic-embed-text')
     expect(embedder.url).toBeUndefined()
+    expect(embedder.apiKey).toBeUndefined()
     expect(embedder.documentTemplate).toBe(EMBEDDING_TEMPLATE)
   })
 
@@ -190,6 +191,10 @@ describe('automatic summarization prerequisite', () => {
 describe('applyEmbeddingVectors', () => {
   beforeEach(() => {
     setupTestDb()
+    upsertSetting('summary.auto', 'on')
+    upsertSetting('summary.provider', 'openai')
+    upsertSetting('summary.model', 'gpt-4.1-mini')
+    upsertSetting('api_key.openai', 'sk-summary')
   })
 
   it('adds a null vector marker for un-summarized docs when embeddings are enabled', () => {
@@ -225,6 +230,16 @@ describe('applyEmbeddingVectors', () => {
     upsertSetting('embedding.model', 'text-embedding-3-small')
     upsertSetting('embedding.api_key', 'sk-x')
     const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: '   ' })
+    expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: null })
+  })
+
+  it('prevents embedding when the summarization prerequisite is lost', () => {
+    deleteSetting('summary.auto')
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-x')
+    const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: 'S' })
     expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: null })
   })
 
@@ -292,6 +307,22 @@ describe('testEmbeddingConnection', () => {
     expect(result.ok).toBe(true)
     expect(result.dimensions).toBe(768)
     expect(mockFetch.mock.calls[0][0] as string).toBe('http://localhost:11434/api/embed')
+  })
+
+  it('does not send an embedding credential to Ollama', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ embeddings: [new Array(768).fill(0.1)] }),
+    })
+    await testEmbeddingConnection({
+      enabled: true,
+      provider: 'ollama',
+      model: 'nomic-embed-text',
+      dimensions: null,
+      baseUrl: 'http://localhost:11434',
+      apiKey: 'sk-openai-secret',
+    })
+    expect(mockFetch.mock.calls[0][1].headers).not.toHaveProperty('authorization')
   })
 
   it('requires provider and model', async () => {

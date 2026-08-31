@@ -1,4 +1,4 @@
-import { getSetting, updateArticleContent } from '../db.js'
+import { getSetting, getArticleById, updateArticleContent } from '../db.js'
 import { getProvider } from '../providers/llm/index.js'
 import { googleTranslate } from '../providers/translate/google-translate.js'
 import { deeplTranslate } from '../providers/translate/deepl.js'
@@ -59,8 +59,14 @@ function isReusableSummarizeProvider(provider: string): boolean {
 export async function autoSummarizeArticle(articleId: number, fullText: string): Promise<boolean> {
   const startedAt = Date.now()
   try {
+    const before = getArticleById(articleId)
+    if (!before || before.feed_type === 'clip' || before.summary?.trim()) return false
+
     const result = await summarizeArticle(fullText)
     if (getSetting('summary.auto') !== 'on') return false
+    const latest = getArticleById(articleId)
+    if (!latest || latest.feed_type === 'clip' || latest.summary?.trim()) return false
+
     updateArticleContent(articleId, { summary: result.summary })
     log.info({ articleId, model: result.model, ms: Date.now() - startedAt }, 'auto-summarized new article')
     return true

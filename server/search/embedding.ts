@@ -194,7 +194,7 @@ export function buildEmbeddersSettings(config: EmbeddingConfig): Embedders {
     documentTemplate: EMBEDDING_TEMPLATE,
     ...(config.dimensions != null ? { dimensions: config.dimensions } : {}),
     ...(config.baseUrl ? { url: config.baseUrl } : {}),
-    ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+    ...(config.provider === 'openai' && config.apiKey ? { apiKey: config.apiKey } : {}),
   }
 
   if (config.provider === 'openai') {
@@ -260,8 +260,10 @@ export function applyEmbeddingVectors<T extends { summary?: string | null; feed_
   config: EmbeddingConfig = getEmbeddingConfig(),
 ): T & { _vectors?: Record<string, null> } {
   if (!config.enabled) return doc
-  if (doc.feed_type !== 'clip' && doc.summary?.trim()) return doc
-  return { ...doc, _vectors: { [EMBEDDER_NAME]: null } }
+  if (!isEmbeddingPrerequisiteMet() || doc.feed_type === 'clip' || !doc.summary?.trim()) {
+    return { ...doc, _vectors: { [EMBEDDER_NAME]: null } }
+  }
+  return doc
 }
 
 // --- Readiness + diagnostics (server-internal) ---
@@ -316,14 +318,16 @@ export async function testEmbeddingConnection(config: EmbeddingConfig): Promise<
   }
   const probe = 'oksskolten embedding connectivity probe'
   const headers: Record<string, string> = { 'content-type': 'application/json' }
-  if (config.apiKey) headers['authorization'] = `Bearer ${config.apiKey}`
 
   try {
     if (config.provider === 'openai') {
       const base = (config.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '')
+      const openAiHeaders = config.apiKey
+        ? { ...headers, authorization: `Bearer ${config.apiKey}` }
+        : headers
       const res = await fetch(`${base}/embeddings`, {
         method: 'POST',
-        headers,
+        headers: openAiHeaders,
         body: JSON.stringify({ model: config.model, input: probe }),
         signal: AbortSignal.timeout(10_000),
       })

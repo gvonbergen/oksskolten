@@ -63,6 +63,13 @@ function validateBaseUrl(raw: string, provider: EmbeddingProvider): { ok: true }
   return { ok: true }
 }
 
+function redactEmbeddingError(error: string, secrets: (string | null | undefined)[]): string {
+  return secrets.reduce((safe, secret) => {
+    if (!secret) return safe
+    return safe.split(secret).join('[redacted]')
+  }, error)
+}
+
 function modelChanged(body: z.infer<typeof EmbeddingPatchBody>, current: EmbeddingConfig): boolean {
   if (body.model === undefined && body.provider === undefined) return false
   const nextModel = body.model ?? (body.provider && !current.model ? EMBEDDING_DEFAULT_MODELS[body.provider] : current.model)
@@ -110,18 +117,6 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
       const current = getEmbeddingConfig()
       const nextProvider = (body.provider ?? current.provider) as EmbeddingProvider | null
 
-      if (body.base_url !== undefined && body.base_url !== '') {
-        if (!nextProvider) {
-          reply.status(400).send({ error: 'Select a provider before configuring base_url' })
-          return
-        }
-        const urlCheck = validateBaseUrl(body.base_url, nextProvider)
-        if (!urlCheck.ok) {
-          reply.status(400).send({ error: urlCheck.error })
-          return
-        }
-      }
-
       const nextModel =
         body.model ?? (body.provider && !current.model ? EMBEDDING_DEFAULT_MODELS[body.provider] : current.model)
       const nextDimensions = body.dimensions === undefined
@@ -130,6 +125,17 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
           ? null
           : body.dimensions
       const nextBaseUrl = body.base_url === undefined ? current.baseUrl : body.base_url.trim() || null
+      if (nextBaseUrl !== null) {
+        if (!nextProvider) {
+          reply.status(400).send({ error: 'Select a provider before configuring base_url' })
+          return
+        }
+        const urlCheck = validateBaseUrl(nextBaseUrl, nextProvider)
+        if (!urlCheck.ok) {
+          reply.status(400).send({ error: urlCheck.error })
+          return
+        }
+      }
       const enabledChanged = body.enabled !== undefined && body.enabled !== (current.enabled ? 'on' : 'off')
       const providerChanged = body.provider !== undefined && body.provider !== current.provider
       const dimensionsChanged = nextDimensions !== current.dimensions
@@ -278,7 +284,11 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
       }
       const result = await testEmbeddingConnection(candidate)
       if (!result.ok) {
-        reply.status(400).send({ error: `Embedding connection test failed: ${result.error}` })
+        const safeError = redactEmbeddingError(result.error || 'unknown error', [
+          candidate.apiKey,
+          getSetting(EMBEDDING_SETTING_API_KEY),
+        ])
+        reply.status(400).send({ error: `Embedding connection test failed: ${safeError}` })
         return
       }
       reply.send(result)

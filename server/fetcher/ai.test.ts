@@ -4,8 +4,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 // Hoisted mocks
 // ---------------------------------------------------------------------------
 
-const { mockGetSetting, mockCreateMessage, mockStreamMessage, mockRequireKey } = vi.hoisted(() => ({
+const { mockGetSetting, mockGetArticleById, mockCreateMessage, mockStreamMessage, mockRequireKey } = vi.hoisted(() => ({
   mockGetSetting: vi.fn(),
+  mockGetArticleById: vi.fn(),
   mockCreateMessage: vi.fn(),
   mockStreamMessage: vi.fn(),
   mockRequireKey: vi.fn(),
@@ -13,6 +14,7 @@ const { mockGetSetting, mockCreateMessage, mockStreamMessage, mockRequireKey } =
 
 vi.mock('../db.js', () => ({
   getSetting: (...args: unknown[]) => mockGetSetting(...args),
+  getArticleById: (...args: unknown[]) => mockGetArticleById(...args),
 }))
 
 vi.mock('../providers/llm/index.js', () => ({

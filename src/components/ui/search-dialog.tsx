@@ -287,7 +287,7 @@ export function SearchDialog({ onClose }: SearchDialogProps) {
             {!indexBuilding && hasSearched && results.length === 0 && (
               <CommandEmpty>{t('search.noResults')}</CommandEmpty>
             )}
-            {keywordFallback && hasSearched && results.length > 0 && (
+            {keywordFallback && hasSearched && (
               <p className="px-4 py-1.5 text-[11px] text-muted/80 text-center select-none">
                 {t('search.semanticFallback')}
               </p>
