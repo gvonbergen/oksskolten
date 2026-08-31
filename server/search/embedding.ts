@@ -6,6 +6,7 @@ import {
   EMBEDDING_PROVIDERS,
   type EmbeddingProvider,
 } from '../../shared/models.js'
+import { getEmbeddingProxyUrl } from './proxy-config.js'
 
 /**
  * Embedding-assisted search configuration.
@@ -80,7 +81,7 @@ export function getEmbeddingConfig(): EmbeddingConfig {
     provider,
     model: getSetting(EMBEDDING_SETTING_MODEL) || null,
     dimensions,
-    baseUrl: getSetting(EMBEDDING_SETTING_BASE_URL) || null,
+    baseUrl: getSetting(EMBEDDING_SETTING_BASE_URL) || (provider === 'ollama' ? process.env.OLLAMA_BASE_URL || null : null),
     apiKey: getSetting(EMBEDDING_SETTING_API_KEY) || null,
   }
 }
@@ -215,14 +216,20 @@ export function buildEmbeddersSettings(config: EmbeddingConfig): Embedders {
   const shared = {
     documentTemplate: EMBEDDING_TEMPLATE,
     ...(config.dimensions != null ? { dimensions: config.dimensions } : {}),
-    ...(config.baseUrl ? { url: config.baseUrl } : {}),
-    ...(config.provider === 'openai' && config.apiKey ? { apiKey: config.apiKey } : {}),
   }
 
   if (config.provider === 'openai') {
-    return { [EMBEDDER_NAME]: { source: 'openAi', model: config.model, ...shared } }
+    return {
+      [EMBEDDER_NAME]: {
+        source: 'openAi',
+        model: config.model,
+        ...(config.baseUrl ? { url: getEmbeddingProxyUrl() } : {}),
+        ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+        ...shared,
+      },
+    }
   }
-  return { [EMBEDDER_NAME]: { source: 'ollama', model: config.model, ...shared } }
+  return { [EMBEDDER_NAME]: { source: 'ollama', model: config.model, url: getEmbeddingProxyUrl(), ...shared } }
 }
 
 /**

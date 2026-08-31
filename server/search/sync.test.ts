@@ -13,6 +13,7 @@ const mockGetIndexes = vi.fn()
 const mockGetSettings = vi.fn()
 const mockCreateIndex = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockDeleteIndex = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
+const mockDeleteDocument = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockSwapIndexes = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 vi.mock('./client.js', () => ({
   getSearchClient: () => ({
@@ -23,6 +24,7 @@ vi.mock('./client.js', () => ({
       updateSettings: mockUpdateSettings,
       getStats: mockGetStats,
       getSettings: mockGetSettings,
+      deleteDocument: mockDeleteDocument,
     }),
     createIndex: mockCreateIndex,
     deleteIndex: mockDeleteIndex,

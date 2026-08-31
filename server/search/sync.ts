@@ -264,7 +264,11 @@ export async function rebuildSearchIndex(): Promise<void> {
             throw new Error(`Meilisearch replay indexing failed: ${message}`)
           }
         } else if (entry.action === 'delete') {
-          await prodIndex.deleteDocument(entry.id)
+          const task = await prodIndex.deleteDocument(entry.id).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+          if (task && task.status === 'failed') {
+            const message = task.error?.message || `replay delete task ${task.uid} failed`
+            throw new Error(`Meilisearch replay indexing failed: ${message}`)
+          }
         } else {
           const update = entry.action === 'score'
             ? { id: entry.id, score: entry.score }
@@ -514,7 +518,7 @@ export async function getSearchIndexRuntime(): Promise<SearchIndexRuntime> {
 
 export function syncArticleToSearch(doc: MeiliArticleDoc): void {
   const config = getEmbeddingConfig()
-  const embeddingDoc = applyEmbeddingVectors(doc, config, rebuilding && !buildEmbeddersSettings(config))
+  const embeddingDoc = applyEmbeddingVectors(doc, config)
   try {
     const client = getSearchClient()
     const index = client.index(ARTICLES_INDEX)
@@ -604,18 +608,21 @@ export function deleteArticlesFromSearch(articleIds: number[]): void {
  * Bulk-sync scores for all articles that have engagement or a non-zero score.
  * Uses the shared SCORED_ARTICLES_WHERE clause from server/db/articles.ts.
  * Called after the daily score recalculation batch to keep Meilisearch in sync.
- * Skips if an index rebuild is in progress (the rebuild will include fresh scores).
+ * Captures current scores for replay when an index rebuild is in progress.
  */
 export async function syncAllScoredArticlesToSearch(): Promise<number> {
-  if (rebuilding) {
-    log.info('Index rebuild in progress, skipping score sync')
-    return 0
-  }
-
   const rows = getDb().prepare(`
     SELECT id, score FROM active_articles
     WHERE ${SCORED_ARTICLES_WHERE}
   `).all() as { id: number; score: number }[]
+
+  if (rebuilding) {
+    if (changeLog) {
+      for (const row of rows) changeLog.push({ action: 'score', id: row.id, score: row.score })
+    }
+    log.info('Index rebuild in progress, captured score sync')
+    return 0
+  }
 
   if (rows.length === 0) return 0
 
@@ -633,8 +640,7 @@ export async function syncAllScoredArticlesToSearch(): Promise<number> {
 export function syncArticlesByFeedToSearch(docs: MeiliArticleDoc[]): void {
   if (docs.length === 0) return
   const config = getEmbeddingConfig()
-  const forceOptOut = rebuilding && !buildEmbeddersSettings(config)
-  const embeddingDocs = docs.map((doc) => applyEmbeddingVectors(doc, config, forceOptOut))
+  const embeddingDocs = docs.map((doc) => applyEmbeddingVectors(doc, config))
   try {
     const client = getSearchClient()
     const index = client.index(ARTICLES_INDEX)

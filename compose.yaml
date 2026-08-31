@@ -21,6 +21,9 @@ services:
       MEILI_URL: http://meilisearch:7700
       OLLAMA_BASE_URL: http://host.docker.internal:11434
       VLLM_BASE_URL: http://host.docker.internal:8000
+      EMBEDDING_PROXY_URL: http://server:3000/api/internal/embedding-proxy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - path: .env
         required: false

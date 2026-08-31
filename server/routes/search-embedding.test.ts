@@ -179,6 +179,9 @@ describe('PATCH /api/settings/search-embedding', () => {
 
     res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'ollama', base_url: 'http://localhost:11434' }, headers: json })
     expect(res.statusCode).toBe(200)
+
+    res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { base_url: 'https://192.168.1.1' }, headers: json })
+    expect(res.statusCode).toBe(400)
   })
 
   it('validates a retained base URL when switching providers', async () => {

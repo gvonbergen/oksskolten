@@ -1,6 +1,4 @@
 import type { FastifyInstance } from 'fastify'
-import { lookup } from 'node:dns/promises'
-import { isIP } from 'node:net'
 import { z } from 'zod'
 import { getSetting, upsertSetting, deleteSetting } from '../db.js'
 import { requireJson } from '../auth.js'
@@ -23,6 +21,7 @@ import {
   type EmbeddingProvider,
 } from '../search/embedding.js'
 import { getSearchIndexRuntime, isRebuilding, requestSearchRebuild } from '../search/sync.js'
+import { validateEmbeddingEndpoint } from '../search/endpoint-safety.js'
 
 const EmbeddingPatchBody = z.object({
   enabled: z.enum(['on', 'off'], { error: 'enabled must be "on" or "off"' }).optional(),
@@ -48,105 +47,6 @@ const EmbeddingTestBody = z.object({
 const EmbeddingKeyBody = z.object({
   apiKey: z.string().max(1000).optional(),
 })
-
-type BaseUrlValidation = { ok: true } | { ok: false; error: string }
-
-function ipv4Number(address: string): number | null {
-  const parts = address.split('.').map(Number)
-  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return null
-  return (((parts[0] * 256 + parts[1]) * 256 + parts[2]) * 256 + parts[3]) >>> 0
-}
-
-function ipv6Number(address: string): bigint | null {
-  const lower = address.toLowerCase()
-  const embedded = lower.match(/(.*):((?:\d+\.){3}\d+)$/)
-  const expanded = embedded
-    ? `${embedded[1]}:${embedded[2].split('.').map(Number).reduce((value, part, index) => index % 2 === 0 ? value + `${Math.floor(part / 256).toString(16)}:` : value + `${(part % 256).toString(16)}${index === 3 ? '' : ':'}`, '')}`
-    : lower
-  const sections = expanded.split('::')
-  if (sections.length > 2) return null
-  const left = sections[0] ? sections[0].split(':') : []
-  const right = sections.length === 2 && sections[1] ? sections[1].split(':') : []
-  const missing = 8 - left.length - right.length
-  if (missing < 0 || (sections.length === 1 && missing !== 0)) return null
-  const groups = [...left, ...Array(missing).fill('0'), ...right]
-  if (groups.length !== 8 || groups.some(group => !/^[0-9a-f]{1,4}$/.test(group))) return null
-  return groups.reduce((value, group) => (value << 16n) | BigInt(parseInt(group, 16)), 0n)
-}
-
-function inCidr(address: string, network: string, bits: number): boolean {
-  const ipVersion = isIP(address)
-  if (ipVersion !== isIP(network)) return false
-  if (ipVersion === 4) {
-    const value = ipv4Number(address)
-    const base = ipv4Number(network)
-    if (value === null || base === null) return false
-    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0
-    return (value & mask) === (base & mask)
-  }
-  const value = ipv6Number(address)
-  const base = ipv6Number(network)
-  if (value === null || base === null) return false
-  const mask = bits === 0 ? 0n : ((1n << BigInt(bits)) - 1n) << BigInt(128 - bits)
-  return (value & mask) === (base & mask)
-}
-
-function isUnsafeResolvedAddress(address: string): boolean {
-  const mapped = address.match(/^::ffff:(\d+(?:\.\d+){3})$/i)?.[1]
-  if (mapped) return isUnsafeResolvedAddress(mapped)
-  if (isIP(address) === 4) {
-    return [
-      ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
-      ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
-      ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24],
-      ['224.0.0.0', 4], ['240.0.0.0', 4],
-    ].some(([network, bits]) => inCidr(address, network as string, bits as number))
-  }
-  return [
-    ['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8], ['2001:db8::', 32],
-  ].some(([network, bits]) => inCidr(address, network as string, bits as number))
-}
-
-function normalizedHostname(parsed: URL): string {
-  return parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase()
-}
-
-function isLocalEndpoint(hostname: string): boolean {
-  return hostname === 'localhost' || hostname === 'host.docker.internal' || isIP(hostname) === 4 && inCidr(hostname, '127.0.0.0', 8) || isIP(hostname) === 6 && inCidr(hostname, '::1', 128)
-}
-
-async function validateBaseUrl(raw: string, _provider: EmbeddingProvider): Promise<BaseUrlValidation> {
-  let parsed: URL
-  try {
-    parsed = new URL(raw)
-  } catch {
-    return { ok: false, error: 'base_url must be a valid absolute URL' }
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    return { ok: false, error: 'base_url must use http:// or https://' }
-  }
-  if (parsed.username || parsed.password) {
-    return { ok: false, error: 'base_url must not contain credentials' }
-  }
-  const hostname = normalizedHostname(parsed)
-  const localEndpoint = isLocalEndpoint(hostname)
-  if (parsed.protocol === 'http:') {
-    return localEndpoint
-      ? { ok: true }
-      : { ok: false, error: 'HTTP base_url is allowed only for loopback or host.docker.internal' }
-  }
-  if (localEndpoint) return { ok: true }
-  let addresses: Array<{ address: string }>
-  try {
-    addresses = await lookup(hostname, { all: true, verbatim: true })
-  } catch {
-    return { ok: false, error: 'base_url hostname could not be resolved safely' }
-  }
-  if (addresses.length === 0 || addresses.some(({ address }) => isUnsafeResolvedAddress(address))) {
-    return { ok: false, error: 'base_url must not resolve to a private, local, link-local, multicast, or unspecified address' }
-  }
-  return { ok: true }
-}
 
 function redactEmbeddingError(error: string, secrets: (string | null | undefined)[]): string {
   return secrets.reduce((safe, secret) => {
@@ -214,13 +114,14 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
         : body.dimensions === ''
           ? null
           : body.dimensions
-      const nextBaseUrl = body.base_url === undefined ? current.baseUrl : body.base_url.trim() || null
+      const storedBaseUrl = getSetting(EMBEDDING_SETTING_BASE_URL) || null
+      const nextBaseUrl = body.base_url === undefined ? storedBaseUrl : body.base_url.trim() || null
       if (nextBaseUrl !== null) {
         if (!nextProvider) {
           reply.status(400).send({ error: 'Select a provider before configuring base_url' })
           return
         }
-        const urlCheck = await validateBaseUrl(nextBaseUrl, nextProvider)
+        const urlCheck = await validateEmbeddingEndpoint(nextBaseUrl)
         if (!urlCheck.ok) {
           reply.status(400).send({ error: urlCheck.error })
           return
@@ -229,7 +130,7 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
       const enabledChanged = body.enabled !== undefined && body.enabled !== (current.enabled ? 'on' : 'off')
       const providerChanged = body.provider !== undefined && body.provider !== current.provider
       const dimensionsChanged = nextDimensions !== current.dimensions
-      const baseUrlChanged = nextBaseUrl !== current.baseUrl
+      const baseUrlChanged = nextBaseUrl !== storedBaseUrl
       const modelWasChanged = modelChanged(body, current)
       const configChanged = enabledChanged || providerChanged || modelWasChanged || dimensionsChanged || baseUrlChanged
 
@@ -366,7 +267,7 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
         return
       }
       if (candidate.baseUrl) {
-        const urlCheck = await validateBaseUrl(candidate.baseUrl, candidate.provider)
+        const urlCheck = await validateEmbeddingEndpoint(candidate.baseUrl)
         if (!urlCheck.ok) {
           reply.status(400).send({ error: urlCheck.error })
           return

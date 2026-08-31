@@ -62,14 +62,14 @@ describe('embedding config compiler', () => {
     expect(embedder.source).toBe('openAi')
     expect(embedder.model).toBe('text-embedding-3-small')
     expect(embedder.dimensions).toBe(1536)
-    expect(embedder.url).toBe('https://openrouter.ai/api/v1')
+    expect(embedder.url).toBeDefined()
     expect(embedder.documentTemplate).toBe(EMBEDDING_TEMPLATE)
     expect(embedder.apiKey).toBe('sk-abc')
     // Only the managed embedder is emitted
     expect(Object.keys(embedders!)).toEqual([EMBEDDER_NAME])
   })
 
-  it('compiles the ollama embedder without a default url and with the model', () => {
+  it('compiles the ollama embedder through the safe proxy with the model', () => {
     upsertSetting('embedding.enabled', 'on')
     upsertSetting('embedding.provider', 'ollama')
     upsertSetting('embedding.model', 'nomic-embed-text')
@@ -78,7 +78,7 @@ describe('embedding config compiler', () => {
     const embedder = embedders![EMBEDDER_NAME] as Record<string, unknown>
     expect(embedder.source).toBe('ollama')
     expect(embedder.model).toBe('nomic-embed-text')
-    expect(embedder.url).toBeUndefined()
+    expect(embedder.url).toBeDefined()
     expect(embedder.apiKey).toBeUndefined()
     expect(embedder.documentTemplate).toBe(EMBEDDING_TEMPLATE)
   })

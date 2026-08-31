@@ -8,8 +8,10 @@ import { searchEmbeddingRoutes } from './search-embedding.js'
 import { adminRoutes } from './admin.js'
 import { apiKeyRoutes } from './apiKeys.js'
 import { statsRoutes } from './stats.js'
+import { embeddingProxyRoutes } from './embedding-proxy.js'
 
 export function registerApi(app: FastifyInstance): void {
+  app.register(embeddingProxyRoutes)
   app.register(async function apiRoutes(api) {
     api.addHook('preHandler', requireAuth)
     api.addHook('preHandler', requireWriteScope)
