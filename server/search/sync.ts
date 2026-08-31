@@ -171,6 +171,10 @@ function assertTaskOk(task: TaskLike | null | undefined, what: string): void {
   }
 }
 
+function redactSecrets(message: string, secrets: (string | null | undefined)[]): string {
+  return secrets.reduce<string>((safe, secret) => (secret ? safe.split(secret).join('[redacted]') : safe), message)
+}
+
 export async function rebuildSearchIndex(): Promise<void> {
   if (rebuilding) {
     log.info('Rebuild already in progress, skipping')
@@ -351,8 +355,7 @@ export async function rebuildSearchIndex(): Promise<void> {
       pendingChangeLog = changeLog ? [...changeLog] : []
     }
     const rawMessage = err instanceof Error ? err.message : String(err)
-    const secrets = [config.apiKey, getEmbeddingConfig().apiKey].filter((secret): secret is string => !!secret)
-    const message = secrets.reduce((safe, secret) => safe.split(secret).join('[redacted]'), rawMessage)
+    const message = redactSecrets(rawMessage, [config.apiKey])
     log.error('Index rebuild failed:', message)
     lastRebuild = {
       startedAt: lastRebuild?.startedAt ?? Date.now(),
@@ -467,7 +470,7 @@ export async function ensureSearchIndex(): Promise<void> {
       // surface the error through the rebuild record shown in the settings
       // API instead of letting startup retries 503 all search.
       if (!(err instanceof TaskFailedError)) throw err
-      const message = err.message
+      const message = redactSecrets(err.message, [config.apiKey])
       log.error('Production settings update failed; search degrades to keyword-only:', message)
       searchReady = true
       liveEmbedderVerified = false

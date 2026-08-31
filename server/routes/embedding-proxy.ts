@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { getEmbeddingConfig } from '../search/embedding.js'
 import { isEmbeddingProxyAuthorized } from '../search/proxy-config.js'
-import { safeEmbeddingRequest } from '../search/endpoint-safety.js'
+import { safeEmbeddingRequest, PROXY_FORWARD_TIMEOUT_MS } from '../search/endpoint-safety.js'
 
 const DEFAULT_OPENAI_URL = 'https://api.openai.com/v1'
 const DEFAULT_OLLAMA_URL = 'http://localhost:11434'
@@ -44,7 +44,7 @@ export async function embeddingProxyRoutes(api: FastifyInstance): Promise<void> 
 
     try {
       const baseUrl = config.baseUrl || (config.provider === 'openai' ? DEFAULT_OPENAI_URL : DEFAULT_OLLAMA_URL)
-      const response = await safeEmbeddingRequest(targetUrl(baseUrl, expectedPath), body, headers)
+      const response = await safeEmbeddingRequest(targetUrl(baseUrl, expectedPath), body, headers, PROXY_FORWARD_TIMEOUT_MS)
       const contentType = response.headers['content-type']
       if (contentType) reply.header('content-type', contentType)
       reply.status(response.statusCode).send(response.body)

@@ -140,7 +140,21 @@ interface SafeResponse {
 
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
-function requestPinned(url: URL, address: string, body: string, headers: Record<string, string>): Promise<SafeResponse> {
+// Short default for the one-shot connectivity probe. Proxied forwarding of
+// Meilisearch embedding requests needs far more headroom: local Ollama
+// computes an entire /api/embed batch before emitting the first response
+// byte, so the probe timeout would 502 every document-embedding task and
+// abort every rebuild. Matches MEILI_TASK_TIMEOUT_MS.
+const PROBE_TIMEOUT_MS = 10_000
+export const PROXY_FORWARD_TIMEOUT_MS = 300_000
+
+function requestPinned(
+  url: URL,
+  address: string,
+  body: string,
+  headers: Record<string, string>,
+  timeoutMs: number,
+): Promise<SafeResponse> {
   const request = url.protocol === 'https:' ? https.request : http.request
   return new Promise((resolve, reject) => {
     const req = request({
@@ -170,7 +184,7 @@ function requestPinned(url: URL, address: string, body: string, headers: Record<
         resolve({ statusCode: response.statusCode || 502, headers: responseHeaders, body: Buffer.concat(chunks) })
       })
     })
-    req.setTimeout(10_000, () => req.destroy(new Error('Embedding endpoint request timed out')))
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('Embedding endpoint request timed out')))
     req.on('error', reject)
     req.end(body)
   })
@@ -183,6 +197,7 @@ export async function safeEmbeddingRequest(
   rawUrl: string,
   body: string,
   headers: Record<string, string>,
+  timeoutMs: number = PROBE_TIMEOUT_MS,
 ): Promise<SafeResponse> {
   let url = new URL(rawUrl)
   for (let attempt = 0; attempt <= MAX_REDIRECTS; attempt++) {
@@ -195,7 +210,7 @@ export async function safeEmbeddingRequest(
     let lastError: unknown = null
     for (const address of addresses) {
       try {
-        response = await requestPinned(url, address, body, headers)
+        response = await requestPinned(url, address, body, headers, timeoutMs)
         break
       } catch (err) {
         lastError = err
