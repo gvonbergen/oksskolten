@@ -46,6 +46,7 @@ export function SearchDialog({ onClose }: SearchDialogProps) {
   const [filterLiked, setFilterLiked] = useState(false)
   const [filterUnread, setFilterUnread] = useState(false)
   const [datePeriod, setDatePeriod] = useState<'today' | 'week' | 'month' | null>(null)
+  const [keywordFallback, setKeywordFallback] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const abortRef = useRef<AbortController>(undefined)
   const sentinelRef = useRef<HTMLDivElement | null>(null)
@@ -99,6 +100,10 @@ export function SearchDialog({ onClose }: SearchDialogProps) {
         return
       }
       setIndexBuilding(false)
+      // Show a discreet notice only after an actual embedding-failure
+      // fallback, never when semantic search is intentionally disabled
+      // (the server then returns search_mode 'keyword', not 'keyword-fallback').
+      setKeywordFallback(data.searchMode === 'keyword-fallback')
       if (offset === 0) {
         setResults(data.articles)
       } else {
@@ -281,6 +286,11 @@ export function SearchDialog({ onClose }: SearchDialogProps) {
             )}
             {!indexBuilding && hasSearched && results.length === 0 && (
               <CommandEmpty>{t('search.noResults')}</CommandEmpty>
+            )}
+            {keywordFallback && hasSearched && results.length > 0 && (
+              <p className="px-4 py-1.5 text-[11px] text-muted/80 text-center select-none">
+                {t('search.semanticFallback')}
+              </p>
             )}
             {displayItems.length > 0 && (
               <CommandGroup>

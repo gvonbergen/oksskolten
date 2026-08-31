@@ -1,9 +1,12 @@
-import { getSetting } from '../db.js'
+import { getSetting, updateArticleContent } from '../db.js'
 import { getProvider } from '../providers/llm/index.js'
 import { googleTranslate } from '../providers/translate/google-translate.js'
 import { deeplTranslate } from '../providers/translate/deepl.js'
 import { TASK_DEFAULTS } from '../../shared/models.js'
 import { DEFAULT_LANGUAGE, languageName } from '../../shared/lang.js'
+import { logger } from '../logger.js'
+
+const log = logger.child('ai')
 
 export type AiBillingMode = 'anthropic' | 'gemini' | 'openai' | 'claude-code' | 'ollama' | 'vllm' | 'google-translate' | 'deepl'
 
@@ -13,6 +16,58 @@ export interface AiTextResult {
   billingMode: AiBillingMode
   model: string
   monthlyChars?: number
+}
+
+/**
+ * True when automatic summarization should fire for newly ingested
+ * articles: the `summary.auto` toggle is ON and a summary provider/model
+ * is configured. Unlike the embedding prerequisite (which requires a
+ * server-verifiable credential), this is permissive for providers whose
+ * failures are caught and logged — e.g. claude-code resolves its auth
+ * state through the CLI at call time.
+ */
+export function shouldAutoSummarizeNow(): boolean {
+  if (getSetting('summary.auto') !== 'on') return false
+  const provider = getSetting('summary.provider') || TASK_DEFAULTS.summarize.provider
+  const model = getSetting('summary.model') || TASK_DEFAULTS.summarize.model
+  if (!model) return false
+  return isReusableSummarizeProvider(provider)
+}
+
+function isReusableSummarizeProvider(provider: string): boolean {
+  switch (provider) {
+    case 'anthropic':
+    case 'gemini':
+    case 'openai':
+      return !!getSetting(`api_key.${provider}`)
+    case 'ollama':
+    case 'vllm':
+    case 'claude-code':
+      return true
+    default:
+      return false
+  }
+}
+
+/**
+ * Generate a summary for a newly ingested article when automatic
+ * summarization is configured. Fire-and-forget from the fetch pipeline;
+ * failures are logged and do not affect article availability (the summary
+ * can still be generated on demand from the article UI). Re-checks the
+ * toggle after generation so a mid-flight disable is honored.
+ */
+export async function autoSummarizeArticle(articleId: number, fullText: string): Promise<boolean> {
+  const startedAt = Date.now()
+  try {
+    const result = await summarizeArticle(fullText)
+    if (getSetting('summary.auto') !== 'on') return false
+    updateArticleContent(articleId, { summary: result.summary })
+    log.info({ articleId, model: result.model, ms: Date.now() - startedAt }, 'auto-summarized new article')
+    return true
+  } catch (err) {
+    log.warn({ articleId, err }, 'auto-summarization failed')
+    return false
+  }
 }
 
 export function detectLanguage(fullText: string): string {

@@ -14,7 +14,7 @@ export async function searchArticles(
   limit: number,
   offset: number,
   signal?: AbortSignal,
-): Promise<{ articles: SearchResult[]; has_more: boolean; indexBuilding?: boolean }> {
+): Promise<{ articles: SearchResult[]; has_more: boolean; indexBuilding?: boolean; searchMode?: 'keyword' | 'hybrid' | 'keyword-fallback' }> {
   const params = new URLSearchParams({ q, limit: String(limit) })
   if (offset > 0) params.set('offset', String(offset))
   if (filters.bookmarked) params.set('bookmarked', '1')
@@ -30,5 +30,5 @@ export async function searchArticles(
   }
   if (!res.ok) return { articles: [], has_more: false }
   const data = await res.json()
-  return { articles: data.articles, has_more: data.has_more ?? false }
+  return { articles: data.articles, has_more: data.has_more ?? false, searchMode: data.search_mode }
 }

@@ -137,6 +137,7 @@ export async function demoFetcher(url: string): Promise<unknown> {
       'reading.auto_mark_read': 'on',
       'chat.provider': 'anthropic',
       'chat.model': 'claude-haiku-4-5-20251001',
+      'summary.auto': null,
       'summary.provider': 'anthropic',
       'summary.model': 'claude-haiku-4-5-20251001',
       'summary.max_tokens': null,
@@ -144,6 +145,24 @@ export async function demoFetcher(url: string): Promise<unknown> {
       'translate.model': '',
       'translate.max_tokens': null,
       'translate.target_lang': null,
+    }
+  }
+
+  // Semantic search is not available in the demo: disabled by default
+  // (demonstrating the fresh-install behavior).
+  if (path === '/api/settings/search-embedding') {
+    return {
+      enabled: 'off',
+      provider: null,
+      model: null,
+      dimensions: null,
+      base_url: null,
+      api_key_configured: false,
+      prerequisite: { met: false, autoSummaryEnabled: false, summaryProvider: 'anthropic', summaryModel: 'claude-haiku-4-5-20251001', reason: null },
+      semantic_ready: false,
+      rebuilding: false,
+      last_rebuild: null,
+      index: null,
     }
   }
 

@@ -71,6 +71,12 @@ services:
     environment:
       MEILI_DB_PATH: /meili_data
       MEILI_LOG_LEVEL: WARN
+    # Lets a locally configured Ollama embedding endpoint (e.g.
+    # http://host.docker.internal:11434) be reachable from the Meilisearch
+    # container on Linux. Docker Desktop provides host.docker.internal
+    # automatically; host-gateway is a no-op there.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - meili_data:/meili_data
     ports:

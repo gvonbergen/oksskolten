@@ -151,7 +151,7 @@ No Ollama-specific log fields. The existing AI task logging records `provider`, 
 - **Pull models from UI**: Users must install models via `ollama pull` on the command line.
 - **GPU/resource monitoring**: No visibility into Ollama's resource usage from within Oksskolten.
 - **Model-specific parameters**: Temperature, top-p, and other sampling parameters are not configurable per-provider in the current architecture.
-- **Ollama embeddings API**: Only the chat completions API is used.
+- **Ollama embeddings API**: Chat still uses the chat-completions API only; Ollama *embedding* models (e.g. `nomic-embed-text`) are supported via the semantic-search feature's Ollama embedder (see [86_feature_semantic_search.md](./86_feature_semantic_search.md)).
 
 ### Key Files
 

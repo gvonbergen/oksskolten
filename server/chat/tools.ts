@@ -14,12 +14,16 @@ import {
   type ArticleListItem,
   type ArticleDetail,
 } from '../db.js'
-import { buildMeiliFilter, meiliSearch } from '../search/client.js'
-import { isSearchReady } from '../search/sync.js'
+import { buildMeiliFilter, meiliSearch, searchArticlesWithHybrid } from '../search/client.js'
+import { isSearchReady, isSemanticReady } from '../search/sync.js'
+import { EMBEDDER_NAME, SEMANTIC_RATIO } from '../search/embedding.js'
 import { summarizeArticle, translateArticle } from '../fetcher.js'
 import { getSetting } from '../db/settings.js'
 import { DEFAULT_LANGUAGE } from '../../shared/lang.js'
 import { articleUrlToPath } from '../../shared/url.js'
+import { logger } from '../logger.js'
+
+const log = logger.child('tools')
 
 /** Convert a UTC datetime string from SQLite to a local-time ISO-like string */
 function toLocalTime(utc: string | null, timeZone?: string): string | null {
@@ -51,7 +55,7 @@ export interface ToolDef {
 
 const searchArticlesTool: ToolDef = {
   name: 'search_articles',
-  description: 'Search articles. Supports Meilisearch full-text keyword search, feed/category filtering, unread/liked/bookmarked filters, and date range. The score field in results is an engagement score (liked+10, bookmarked+5, translated+3, read+2 with time decay) — higher values indicate more important articles. Use this for recommendations and rankings. The url field is an app-internal path (/example.com/...) — use it as-is for links.',
+  description: 'Search articles. Uses hybrid semantic + keyword search when available (title/summary embeddings) with keyword fallback; supports feed/category filtering, unread/liked/bookmarked filters, and date range. The score field in results is an engagement score (liked+10, bookmarked+5, translated+3, read+2 with time decay) — higher values indicate more important articles. Use this for recommendations and rankings. The url field is an app-internal path (/example.com/...) — use it as-is for links.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -82,11 +86,20 @@ const searchArticlesTool: ToolDef = {
     let results: ArticleListItem[]
 
     if (query && isSearchReady()) {
-      // Meilisearch path
+      // Meilisearch path: hybrid semantic+keyword when healthy, otherwise
+      // keyword-only. A semantic failure falls back to keyword results and
+      // is logged — never returned as an empty result set.
       const filter = buildMeiliFilter({ feed_id, category_id, since, until, unread, liked, bookmarked })
       const meiliSort = sort ? [`${sort}:desc`] : undefined
+      const hybrid =
+        isSemanticReady() && query.trim().length >= 2
+          ? { embedder: EMBEDDER_NAME, semanticRatio: SEMANTIC_RATIO }
+          : undefined
 
-      const { hits } = await meiliSearch(query, { limit, filter, sort: meiliSort })
+      const { hits, searchMode } = await searchArticlesWithHybrid(query, { limit, filter, sort: meiliSort, hybrid })
+      if (searchMode === 'keyword-fallback') {
+        log.warn('Semantic search unavailable; returning keyword results to chat tool')
+      }
       const ids = hits.map((h) => h.id)
       results = getArticlesByIds(ids)
     } else {

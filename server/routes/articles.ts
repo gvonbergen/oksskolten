@@ -25,8 +25,9 @@ import {
   type ArticleDetail,
 } from '../db.js'
 import type { MeiliArticleDoc } from '../search/client.js'
-import { buildMeiliFilter, meiliSearch } from '../search/client.js'
-import { isSearchReady, syncArticleToSearch } from '../search/sync.js'
+import { buildMeiliFilter, searchArticlesWithHybrid } from '../search/client.js'
+import { isSearchReady, isSemanticReady, syncArticleToSearch } from '../search/sync.js'
+import { EMBEDDER_NAME, SEMANTIC_RATIO } from '../search/embedding.js'
 import { requireJson } from '../auth.js'
 import { summarizeArticle, translateArticle, streamSummarizeArticle, streamTranslateArticle, fetchArticleContent } from '../fetcher.js'
 import type { AiTextResult } from '../fetcher.js'
@@ -266,12 +267,25 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
         bookmarked,
       })
 
-      const { hits, estimatedTotalHits } = await meiliSearch(query.q, { limit, offset, filter })
+      // Conservative hybrid semantic+keyword search only when semantic is
+      // configured, healthy and the query is a real phrase; any embedding
+      // failure falls back to the keyword path inside the client helper and
+      // is reported via search_mode instead of returning empty results.
+      const hybrid =
+        isSemanticReady() && query.q.trim().length >= 2
+          ? { embedder: EMBEDDER_NAME, semanticRatio: SEMANTIC_RATIO }
+          : undefined
+      const { hits, estimatedTotalHits, searchMode } = await searchArticlesWithHybrid(query.q, {
+        limit,
+        offset,
+        filter,
+        hybrid,
+      })
       const ids = hits.map((h) => h.id)
 
       const articles = getArticlesByIds(ids)
       const hasMore = offset + hits.length < estimatedTotalHits
-      reply.send({ articles, has_more: hasMore })
+      reply.send({ articles, has_more: hasMore, search_mode: searchMode })
     } catch (err) {
       log.error('Meilisearch query failed:', err)
       reply.send({ articles: [] })

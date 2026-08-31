@@ -2,5 +2,7 @@ export {
   ANTHROPIC_MODELS, GEMINI_MODELS, OPENAI_MODELS,
   DEFAULT_MODELS, PROVIDER_LABELS,
   LLM_API_PROVIDERS, TRANSLATE_SERVICE_PROVIDERS, LLM_TASK_PROVIDERS,
-  type ModelDef, type ModelGroup,
+  EMBEDDING_PROVIDERS, EMBEDDING_MODELS, EMBEDDING_DEFAULT_MODELS,
+  getEmbeddingModelLabel,
+  type ModelDef, type ModelGroup, type EmbeddingProvider, type EmbeddingModelDef,
 } from '../../shared/models'

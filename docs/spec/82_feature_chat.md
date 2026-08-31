@@ -70,7 +70,7 @@ Tool definitions are managed in a neutral `ToolDef` format in `server/chat/tools
 
 | Tool Name | Description | Input |
 |---|---|---|
-| `search_articles` | Search articles (Meilisearch full-text search, feed, category, date range, unread/liked/bookmarked) | `{ query?, feed_id?, category_id?, unread?, liked?, bookmarked?, since?, until?, limit? }` |
+| `search_articles` | Search articles (hybrid semantic + keyword search when available with keyword fallback; feed, category, date range, unread/liked/bookmarked) | `{ query?, feed_id?, category_id?, unread?, liked?, bookmarked?, since?, until?, limit? }` |
 | `get_article` | Get article details (including full_text, full_text_ja) | `{ article_id }` |
 | `get_similar_articles` | Search for articles similar to a given article via Meilisearch | `{ article_id, limit? }` |
 | `get_user_preferences` | Get user reading preferences (top feeds, categories, recent likes/bookmarks, per-category read rate, ignored feeds) | `{}` |
@@ -192,7 +192,7 @@ Requires SSH key authentication (password prompts break stdio).
 
 ### Search Architecture
 
-The `search_articles` tool combines Meilisearch full-text search with structured filters.
+The `search_articles` tool combines Meilisearch full-text search with structured filters. When semantic search is configured and healthy it runs as hybrid semantic + keyword search (title+summary embeddings) with an automatic keyword fallback; see [86_feature_semantic_search.md](./86_feature_semantic_search.md).
 
 ```
 User: "What was that Cloudflare article I read last week?"

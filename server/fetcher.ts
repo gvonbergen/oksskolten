@@ -23,7 +23,7 @@ import { type FetchProgressEvent, emitProgress, markFeedDone } from './fetcher/p
 import { fetchFullText, isBotBlockPage, convertHtmlToMarkdown, markdownToExcerpt, MIN_EXTRACTED_LENGTH } from './fetcher/content.js'
 import { type FetchRssResult, type RssItem, fetchAndParseRss, RateLimitError } from './fetcher/rss.js'
 import { computeInterval, computeEmpiricalInterval, sqliteFuture, DEFAULT_INTERVAL } from './fetcher/schedule.js'
-import { detectLanguage } from './fetcher/ai.js'
+import { detectLanguage, autoSummarizeArticle, shouldAutoSummarizeNow } from './fetcher/ai.js'
 import { logger } from './logger.js'
 
 const log = logger.child('fetcher')
@@ -32,7 +32,7 @@ const log = logger.child('fetcher')
 export { normalizeDate } from './fetcher/util.js'
 export { type FetchProgressEvent, fetchProgress, getFeedState } from './fetcher/progress.js'
 export { discoverRssUrl } from './fetcher/rss.js'
-export { detectLanguage, summarizeArticle, streamSummarizeArticle, translateArticle, streamTranslateArticle } from './fetcher/ai.js'
+export { detectLanguage, summarizeArticle, streamSummarizeArticle, translateArticle, streamTranslateArticle, autoSummarizeArticle, shouldAutoSummarizeNow } from './fetcher/ai.js'
 export type { AiTextResult, AiBillingMode } from './fetcher/ai.js'
 
 /**
@@ -225,6 +225,14 @@ async function processArticle(task: ArticleTask): Promise<boolean> {
       })
       // Fire-and-forget: detect similar articles asynchronously
       void detectAndStoreSimilarArticles(articleId, task.title, task.feed_id, task.published_at)
+      // Fire-and-forget: automatic summarization when configured. New
+      // articles enter with no summary, so any article with full text is
+      // eligible; the summary lands via updateArticleContent, which also
+      // re-upserts the search document and therefore triggers vector
+      // generation for embedding-enabled indexes.
+      if (content.fullText && shouldAutoSummarizeNow()) {
+        void autoSummarizeArticle(articleId, content.fullText)
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (!msg.includes('UNIQUE constraint failed')) {
@@ -239,6 +247,11 @@ async function processArticle(task: ArticleTask): Promise<boolean> {
       og_image: content.ogImage,
       last_error: content.lastError,
     })
+    // A retry article that just obtained its full text is summarizable
+    // now even though it was ingested before the summary existed.
+    if (content.fullText && shouldAutoSummarizeNow() && !task.article.summary) {
+      void autoSummarizeArticle(task.article.id, content.fullText)
+    }
   }
   return !!content.lastError
 }

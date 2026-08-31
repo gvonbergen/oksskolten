@@ -2,6 +2,7 @@ import { getDb, runNamed, getNamed, allNamed } from './connection.js'
 import type { Article, ArticleListItem, ArticleDetail } from './types.js'
 import type { MeiliArticleDoc } from '../search/client.js'
 import { syncArticleToSearch, deleteArticleFromSearch, deleteArticlesFromSearch, syncArticleScoreToSearch, syncArticleFiltersToSearch } from '../search/sync.js'
+import { applyEmbeddingVectors } from '../search/embedding.js'
 import { RETRY_MAX_ATTEMPTS, RETRY_BATCH_LIMIT } from '../fetcher/util.js'
 import { deleteArticleImages } from '../fetcher/article-images.js'
 import { logger } from '../logger.js'
@@ -16,6 +17,7 @@ export function normalizeUrl(raw: string): string {
 function buildMeiliDoc(id: number): MeiliArticleDoc | null {
   const row = getDb().prepare(`
     SELECT id, feed_id, category_id, title,
+           summary,
            COALESCE(full_text, '') AS full_text,
            COALESCE(full_text_translated, '') AS full_text_translated,
            lang,
@@ -26,7 +28,8 @@ function buildMeiliDoc(id: number): MeiliArticleDoc | null {
            (bookmarked_at IS NOT NULL) AS is_bookmarked
     FROM articles WHERE id = ?
   `).get(id) as MeiliArticleDoc | undefined
-  return row ?? null
+  if (!row) return null
+  return applyEmbeddingVectors(row)
 }
 
 // --- Score computation ---

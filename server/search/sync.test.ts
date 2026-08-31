@@ -10,6 +10,7 @@ const mockAddDocuments = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockUpdateSettings = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockGetStats = vi.fn()
 const mockGetIndexes = vi.fn()
+const mockGetSettings = vi.fn()
 const mockCreateIndex = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockDeleteIndex = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockSwapIndexes = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
@@ -21,6 +22,7 @@ vi.mock('./client.js', () => ({
       addDocuments: mockAddDocuments,
       updateSettings: mockUpdateSettings,
       getStats: mockGetStats,
+      getSettings: mockGetSettings,
     }),
     createIndex: mockCreateIndex,
     deleteIndex: mockDeleteIndex,
@@ -30,7 +32,8 @@ vi.mock('./client.js', () => ({
   ARTICLES_STAGING_INDEX: 'articles_staging',
 }))
 
-import { ensureSearchIndex, isSearchReady, syncAllScoredArticlesToSearch, _setRebuilding, _setSearchReady } from './sync.js'
+import { ensureSearchIndex, isSearchReady, isSemanticReady, syncAllScoredArticlesToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, rebuildSearchIndex, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
+import { upsertSetting, deleteSetting } from '../db.js'
 
 function seedFeed(): number {
   return getDb().prepare(
@@ -232,5 +235,226 @@ describe('ensureSearchIndex', () => {
 
     await expect(ensureSearchIndex()).rejects.toThrow(/rebuild/i)
     expect(isSearchReady()).toBe(false)
+  })
+})
+
+describe('embedder lifecycle — regression for #117 (rebuild must not lose the embedder)', () => {
+  beforeEach(() => {
+    setupTestDb()
+    mockGetIndexes.mockReset()
+    mockGetStats.mockReset()
+    mockGetSettings.mockReset()
+    mockCreateIndex.mockClear()
+    mockDeleteIndex.mockClear()
+    mockAddDocuments.mockClear()
+    mockSwapIndexes.mockClear()
+    mockUpdateSettings.mockClear()
+    mockUpdateDocuments.mockClear()
+    mockWaitTask.mockClear()
+    _setRebuilding(false)
+    _setSearchReady(false)
+    _setLiveEmbedderVerified(false)
+    _resetRebuildRecord()
+  })
+
+  function seedEmbeddingSettings() {
+    // The embedding runtime requires automatic summarization to be
+    // configured and enabled (enforced by the settings API too).
+    upsertSetting('summary.auto', 'on')
+    upsertSetting('summary.provider', 'openai')
+    upsertSetting('summary.model', 'gpt-4.1-mini')
+    upsertSetting('api_key.openai', 'sk-summary')
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.dimensions', '1536')
+    upsertSetting('embedding.api_key', 'sk-embedding-test')
+  }
+
+  it('resolveIndexSettings includes the managed embedder when enabled and stays keyword-only when disabled', () => {
+    seedEmbeddingSettings()
+    const settings = resolveIndexSettings() as Record<string, unknown>
+    expect(settings.embedders).toBeDefined()
+    const embedders = settings.embedders as Record<string, unknown>
+    expect(Object.keys(embedders)).toEqual(['article-v1'])
+
+    upsertSetting('embedding.enabled', 'off')
+    const disabled = resolveIndexSettings() as Record<string, unknown>
+    expect(disabled.embedders).toBeUndefined()
+  })
+
+  it('rebuild applies the embedder to the new staging index before documents — no embedder is lost after create/swap/delete', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    const summarized = seedArticle(feedId, { url: 'https://example.com/summarized' })
+    seedArticle(feedId, { url: 'https://example.com/plain' })
+    getDb().prepare('UPDATE articles SET summary = ? WHERE id = ?').run('A short summary.', summarized)
+
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }, { uid: 'articles_staging' }] })
+
+    await rebuildSearchIndex()
+
+    // Staging settings carried the embedder (the #117 regression path)
+    const stagingSettings = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>
+    expect(stagingSettings.embedders).toBeDefined()
+    expect((stagingSettings.embedders as Record<string, unknown>)['article-v1']).toMatchObject({
+      source: 'openAi',
+      model: 'text-embedding-3-small',
+    })
+
+    // Documents carry summary and _vectors markers: summarized docs are
+    // embedded from the template, un-summarized docs are explicitly skipped.
+    const docs = mockAddDocuments.mock.calls[0][0] as Record<string, unknown>[]
+    expect(docs).toHaveLength(2)
+    const byUrl = Object.fromEntries(docs.map(d => [d.id, d]))
+    const summarizedDoc = byUrl[summarized]
+    expect(summarizedDoc.summary).toBe('A short summary.')
+    expect(summarizedDoc._vectors).toBeUndefined()
+    const plainDoc = docs.find(d => d.id !== summarized)!
+    expect(plainDoc._vectors).toEqual({ 'article-v1': null })
+
+    expect(isSearchReady()).toBe(true)
+    expect(isSemanticReady()).toBe(true)
+  })
+
+  it('startup reconciliation re-applies the embedder to an already-populated production index', async () => {
+    seedEmbeddingSettings()
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockGetStats.mockResolvedValue({ numberOfDocuments: 7 })
+    mockGetSettings.mockResolvedValue({
+      embedders: {
+        'article-v1': { source: 'openAi', model: 'text-embedding-3-small', dimensions: 1536, documentTemplate: '{{doc.title}}\n\n{{doc.summary}}', apiKey: 'sk-live-copy' },
+      },
+    })
+
+    await ensureSearchIndex()
+
+    const applied = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>
+    expect(applied.embedders).toBeDefined()
+    expect(isSearchReady()).toBe(true)
+    // The live index carries the expected embedder (secrets stripped in the comparison)
+    expect(isSemanticReady()).toBe(true)
+  })
+
+  it('semantic readiness stays false when the live index lacks the expected embedder', async () => {
+    seedEmbeddingSettings()
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockGetStats.mockResolvedValue({ numberOfDocuments: 7 })
+    mockGetSettings.mockResolvedValue({ embedders: null })
+
+    await ensureSearchIndex()
+
+    expect(isSearchReady()).toBe(true)
+    expect(isSemanticReady()).toBe(false)
+  })
+
+  it('a failed document batch task aborts before the swap and records the error', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/bad' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockAddDocuments.mockReturnValueOnce({
+      waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'Embedding generation failed: invalid API key' } }),
+    })
+
+    await rebuildSearchIndex()
+
+    expect(mockSwapIndexes).not.toHaveBeenCalled()
+    expect(isSearchReady()).toBe(false)
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild?.ok).toBe(false)
+    expect(runtime.lastRebuild?.error).toContain('Embedding generation failed')
+  })
+
+  it('disabling embeddings rebuilds without an embedder and drops semantic readiness', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/a' })
+    mockGetIndexes.mockResolvedValue({ results: [] })
+
+    await rebuildSearchIndex()
+    expect(isSemanticReady()).toBe(true)
+
+    upsertSetting('embedding.enabled', 'off')
+    _setLiveEmbedderVerified(false)
+    mockAddDocuments.mockClear()
+
+    // Second (keyword-only) rebuild
+    await rebuildSearchIndex()
+    const settings = mockUpdateSettings.mock.calls[1][0] as Record<string, unknown>
+    expect(settings.embedders).toBeUndefined()
+    const docs = mockAddDocuments.mock.calls[0][0] as Record<string, unknown>[]
+    expect(docs[0]._vectors).toBeUndefined()
+    expect(isSemanticReady()).toBe(false)
+  })
+
+  it('does not start duplicate concurrent rebuilds', async () => {
+    mockGetIndexes.mockResolvedValue({ results: [] })
+    const first = rebuildSearchIndex()
+    const second = rebuildSearchIndex()
+    await Promise.all([first, second])
+    expect(mockGetIndexes).toHaveBeenCalledTimes(1)
+  })
+
+  it('getSearchIndexRuntime reports stats from Meilisearch with semantic readiness', async () => {
+    seedEmbeddingSettings()
+    _setSearchReady(true)
+    _setLiveEmbedderVerified(true)
+    mockGetStats.mockResolvedValue({
+      numberOfDocuments: 10,
+      numberOfEmbeddedDocuments: 8,
+      numberOfEmbeddings: 8,
+    })
+
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.semanticReady).toBe(true)
+    expect(runtime.index?.documents).toBe(10)
+    expect(runtime.index?.embeddedDocuments).toBe(8)
+    expect(runtime.index?.embeddings).toBe(8)
+  })
+})
+
+describe('semantic readiness reacts to prerequisite changes at runtime', () => {
+  beforeEach(() => {
+    setupTestDb()
+    _setSearchReady(true)
+    _setLiveEmbedderVerified(true)
+  })
+
+  it('drops hybrid readiness when automatic summarization is disabled later', () => {
+    upsertSetting('summary.auto', 'on')
+    upsertSetting('summary.provider', 'openai')
+    upsertSetting('summary.model', 'gpt-4.1-mini')
+    upsertSetting('api_key.openai', 'sk-sum')
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-embed')
+
+    expect(isSemanticReady()).toBe(true)
+
+    // Automatic summarization switched off — embeddings must stop operating
+    // (keyword-only) even though the toggle is still on.
+    deleteSetting('summary.auto')
+    expect(isSemanticReady()).toBe(false)
+
+    // Re-enabling the prerequisite restores readiness without a rebuild.
+    upsertSetting('summary.auto', 'on')
+    expect(isSemanticReady()).toBe(true)
+  })
+
+  it('stays keyword-only when the provider credential is removed', () => {
+    upsertSetting('summary.auto', 'on')
+    upsertSetting('summary.provider', 'openai')
+    upsertSetting('summary.model', 'gpt-4.1-mini')
+    upsertSetting('api_key.openai', 'sk-sum')
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-embed')
+
+    expect(isSemanticReady()).toBe(true)
+    deleteSetting('embedding.api_key')
+    expect(isSemanticReady()).toBe(false)
   })
 })

@@ -1,7 +1,15 @@
+import type { Settings } from 'meilisearch'
 import { getSearchClient, ARTICLES_INDEX, ARTICLES_STAGING_INDEX, type MeiliArticleDoc } from './client.js'
 import { getDb } from '../db/connection.js'
 import { SCORED_ARTICLES_WHERE } from '../db/articles.js'
 import { logger } from '../logger.js'
+import {
+  applyEmbeddingVectors,
+  buildEmbeddersSettings,
+  getEmbeddingConfig,
+  isEmbeddingPrerequisiteMet,
+  matchesExpectedEmbedder,
+} from './embedding.js'
 
 const log = logger.child('search')
 
@@ -10,8 +18,45 @@ const log = logger.child('search')
 let searchReady = false
 let rebuilding = false
 
+/**
+ * True when the live production index carries the embedder configuration
+ * expected by the current settings. Refreshed after every successful
+ * rebuild and on startup verification; the settings API cannot change the
+ * embedder config without triggering a rebuild, so this stays accurate
+ * between rebuilds.
+ */
+let liveEmbedderVerified = false
+
+interface RebuildRecord {
+  startedAt: number
+  finishedAt: number | null
+  ok: boolean | null
+  error: string | null
+  documents: number | null
+}
+
+let lastRebuild: RebuildRecord | null = null
+
+// Bounded cache for Meilisearch index stats (documents / embedded documents)
+let statsCache: { documents: number; embeddedDocuments: number; embeddings: number; fetchedAt: number } | null = null
+const STATS_CACHE_TTL_MS = 10_000
+
 export function isSearchReady(): boolean {
   return searchReady
+}
+
+/**
+ * Semantic readiness: embeddings are ON, the automatic-summarization
+ * prerequisite is met, the embedding provider credential is present, and
+ * the live index carries the expected embedder. Everything else (disabled,
+ * prerequisite lost, stale index) means keyword-only behavior.
+ */
+export function isSemanticReady(): boolean {
+  const config = getEmbeddingConfig()
+  if (!config.enabled || !config.provider || !config.model) return false
+  if (!isEmbeddingPrerequisiteMet()) return false
+  if (config.provider === 'openai' && !config.apiKey) return false
+  return liveEmbedderVerified
 }
 
 /** @internal Test-only helper to control rebuilding flag */
@@ -24,6 +69,17 @@ export function _setSearchReady(value: boolean): void {
   searchReady = value
 }
 
+/** @internal Test-only helper to control the live embedder verification flag */
+export function _setLiveEmbedderVerified(value: boolean): void {
+  liveEmbedderVerified = value
+}
+
+/** @internal Test-only helper to reset runtime/rebuild records between cases */
+export function _resetRebuildRecord(): void {
+  lastRebuild = null
+  statsCache = null
+}
+
 // --- Change log for rebuild consistency ---
 
 type ChangeEntry =
@@ -34,11 +90,24 @@ let changeLog: ChangeEntry[] | null = null
 
 // --- Index settings ---
 
-const INDEX_SETTINGS = {
+const INDEX_SETTINGS: Omit<Settings, 'embedders'> = {
   searchableAttributes: ['title', 'full_text', 'full_text_translated'],
   filterableAttributes: ['feed_id', 'category_id', 'lang', 'published_at', 'is_unread', 'is_liked', 'is_bookmarked'],
   sortableAttributes: ['published_at', 'score'],
   rankingRules: ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness'],
+}
+
+/**
+ * Managed index settings. The embedder is first-class managed
+ * configuration, so every index generation (staging rebuild, first-run
+ * production, populated-startup reconciliation) receives the same object
+ * and no index can ever lose the embedder you configured — the #117
+ * regression. When embeddings are disabled the settings are exactly the
+ * keyword config from before, preserving existing behavior.
+ */
+export function resolveIndexSettings(config = getEmbeddingConfig()): Settings {
+  const embedders = buildEmbeddersSettings(config)
+  return embedders ? { ...INDEX_SETTINGS, embedders } : { ...INDEX_SETTINGS }
 }
 
 // --- Rebuild ---
@@ -60,6 +129,10 @@ export async function rebuildSearchIndex(): Promise<void> {
   }
   rebuilding = true
   changeLog = []
+  const config = getEmbeddingConfig()
+  const settings = resolveIndexSettings(config)
+  const embedderPlanned = !!buildEmbeddersSettings(config)
+  lastRebuild = { startedAt: Date.now(), finishedAt: null, ok: null, error: null, documents: null }
 
   try {
     const client = getSearchClient()
@@ -75,13 +148,14 @@ export async function rebuildSearchIndex(): Promise<void> {
     }
     await client.createIndex(ARTICLES_STAGING_INDEX, { primaryKey: 'id' }).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
 
-    // 2. Apply index settings to staging
+    // 2. Apply index settings (including the managed embedder) to staging
     const stagingIndex = client.index(ARTICLES_STAGING_INDEX)
-    await stagingIndex.updateSettings(INDEX_SETTINGS).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+    await stagingIndex.updateSettings(settings).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
 
     // 3. Fetch all articles from SQLite and batch-insert into staging
     const rows = getDb().prepare(`
       SELECT id, feed_id, category_id, title,
+             summary,
              COALESCE(full_text, '') AS full_text,
              COALESCE(full_text_translated, '') AS full_text_translated,
              lang,
@@ -94,16 +168,25 @@ export async function rebuildSearchIndex(): Promise<void> {
     `).all() as MeiliArticleDoc[]
 
     // SQLite returns 0/1 for boolean expressions; Meilisearch needs true/false
-    const docs = rows.map((row) => ({
+    const docs = rows.map((row) => applyEmbeddingVectors({
       ...row,
       is_unread: Boolean(row.is_unread),
       is_liked: Boolean(row.is_liked),
       is_bookmarked: Boolean(row.is_bookmarked),
-    }))
+    }, config))
 
     for (let i = 0; i < docs.length; i += BATCH_SIZE) {
       const batch = docs.slice(i, i + BATCH_SIZE)
-      await stagingIndex.addDocuments(batch).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+      const task = await stagingIndex.addDocuments(batch).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+      // A failed document task with an embedder configured means embedding
+      // generation is broken (bad credential, provider outage, dimension
+      // mismatch). Abort before the swap so the previous production index
+      // stays usable for both keyword and semantic search instead of
+      // promoting an index that was never built.
+      if (task && task.status === 'failed') {
+        const message = task.error?.message || `document batch task ${task.uid} failed`
+        throw new Error(`Meilisearch document indexing failed: ${message}`)
+      }
     }
 
     // 4. Promote staging to production
@@ -137,11 +220,16 @@ export async function rebuildSearchIndex(): Promise<void> {
     }
 
     searchReady = true
+    liveEmbedderVerified = embedderPlanned
+    lastRebuild = { ...lastRebuild!, finishedAt: Date.now(), ok: true, error: null, documents: docs.length }
+    statsCache = null
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1)
-    log.info(`Index rebuild complete: ${docs.length} articles in ${elapsed}s`)
+    log.info(`Index rebuild complete: ${docs.length} articles in ${elapsed}s${embedderPlanned ? ' (embeddings enabled)' : ''}`)
   } catch (err) {
     // On failure: keep searchReady as-is (true if previously built, false if first time)
+    const message = err instanceof Error ? err.message : String(err)
     log.error('Index rebuild failed:', err)
+    lastRebuild = { startedAt: lastRebuild?.startedAt ?? Date.now(), finishedAt: Date.now(), ok: false, error: message, documents: lastRebuild?.documents ?? null }
   } finally {
     changeLog = null
     rebuilding = false
@@ -183,9 +271,12 @@ export async function ensureSearchIndex(): Promise<void> {
   }
 
   if (populatedDocCount > 0) {
-    // Step 2: schema sync. Apply current INDEX_SETTINGS idempotently so a
-    // redeploy that changed filterableAttributes / searchableAttributes
-    // picks up the new schema without paying for a full rebuild.
+    // Step 2: schema sync. Apply current managed settings idempotently so a
+    // redeploy that changed filterableAttributes / searchableAttributes —
+    // or the managed embedder (enabled/disabled/provider/model) — picks up
+    // the new shape without paying for a full rebuild. This is the startup
+    // half of the #117 fix: a populated production index always has the
+    // configured embedder re-applied.
     // Deliberately do NOT fall back to rebuildSearchIndex on failure here:
     // the only way this fails is Meilisearch queue pressure or a transient
     // error, and triggering a full rebuild (delete + create + swap +
@@ -193,7 +284,8 @@ export async function ensureSearchIndex(): Promise<void> {
     // "Index articles_staging already exists" pile-up. Surface the error
     // to the startup retry loop instead so it backs off cleanly.
     const client = getSearchClient()
-    await client.index(ARTICLES_INDEX).updateSettings(INDEX_SETTINGS).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+    await client.index(ARTICLES_INDEX).updateSettings(resolveIndexSettings()).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+    await verifyLiveEmbedder()
     searchReady = true
     log.info(`Search index already populated (${populatedDocCount} docs); skipping startup rebuild`)
     return
@@ -206,6 +298,83 @@ export async function ensureSearchIndex(): Promise<void> {
     // the startup retry loop in server/index.ts can back off and try
     // again instead of declaring success against an unbuilt index.
     throw new Error('Search index rebuild did not complete')
+  }
+}
+
+/**
+ * Compare the live production index's embedder settings against the
+ * current managed configuration (secrets stripped). Called at startup on
+ * the populated path. A mismatch — for example an embedder manually
+ * swapped by another tool, or a previous rebuild that never completed —
+ * marks semantic search unavailable while keyword search keeps working.
+ */
+async function verifyLiveEmbedder(): Promise<void> {
+  try {
+    const client = getSearchClient()
+    const settings = await client.index(ARTICLES_INDEX).getSettings()
+    liveEmbedderVerified = matchesExpectedEmbedder(
+      (settings.embedders as Record<string, unknown> | undefined) ?? null,
+      getEmbeddingConfig(),
+    )
+    statsCache = null
+  } catch (err) {
+    log.warn('Failed to verify embedder settings on the live index:', err)
+    liveEmbedderVerified = false
+  }
+}
+
+/**
+ * Kick off a rebuild without awaiting it. Used by the settings API when
+ * embedding configuration changes; the existing `rebuilding` guard
+ * prevents duplicate concurrent rebuilds.
+ */
+export function requestSearchRebuild(): void {
+  void rebuildSearchIndex()
+}
+
+export function isRebuilding(): boolean {
+  return rebuilding
+}
+
+export interface SearchIndexRuntime {
+  semanticReady: boolean
+  rebuilding: boolean
+  lastRebuild: { startedAt: number; finishedAt: number | null; ok: boolean | null; error: string | null; documents: number | null } | null
+  index: { documents: number | null; embeddedDocuments: number | null; embeddings: number | null } | null
+}
+
+/**
+ * Runtime diagnostics for the settings API. Index stats come from
+ * Meilisearch with a short TTL cache; any failure returns nulls rather
+ * than throwing.
+ */
+export async function getSearchIndexRuntime(): Promise<SearchIndexRuntime> {
+  let indexStats: SearchIndexRuntime['index'] = null
+  if (searchReady) {
+    try {
+      if (!statsCache || Date.now() - statsCache.fetchedAt > STATS_CACHE_TTL_MS) {
+        const stats = await getSearchClient().index(ARTICLES_INDEX).getStats()
+        statsCache = {
+          documents: stats.numberOfDocuments,
+          embeddedDocuments: stats.numberOfEmbeddedDocuments ?? 0,
+          embeddings: stats.numberOfEmbeddings ?? 0,
+          fetchedAt: Date.now(),
+        }
+      }
+      indexStats = {
+        documents: statsCache.documents,
+        embeddedDocuments: statsCache.embeddedDocuments,
+        embeddings: statsCache.embeddings,
+      }
+    } catch (err) {
+      log.warn('Failed to read index stats:', err)
+    }
+  }
+  return {
+    semanticReady: isSemanticReady(),
+    rebuilding,
+    lastRebuild: lastRebuild ? { ...lastRebuild } : null,
+    index: indexStats,
   }
 }
 
