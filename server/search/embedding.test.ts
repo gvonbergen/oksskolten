@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { setupTestDb } from '../__tests__/helpers/testDb.js'
 import { upsertSetting, deleteSetting } from '../db.js'
-import { TASK_DEFAULTS } from '../../shared/models.js'
 import {
   EMBEDDER_NAME,
   EMBEDDING_TEMPLATE,
@@ -178,13 +177,13 @@ describe('automatic summarization prerequisite', () => {
     expect(p.reason).toContain('claude-code')
   })
 
-  it('falls back to the default summary model when none is configured (defaults always apply)', () => {
+  it('requires a model when a summary provider is explicitly selected', () => {
     upsertSetting('summary.auto', 'on')
-    upsertSetting('summary.provider', 'anthropic')
-    upsertSetting('api_key.anthropic', 'sk-ant-x')
+    upsertSetting('summary.provider', 'openai')
+    upsertSetting('api_key.openai', 'sk-openai')
     deleteSetting('summary.model')
-    expect(getEmbeddingPrerequisite().summaryModel).toBe(TASK_DEFAULTS.summarize.model)
-    expect(getEmbeddingPrerequisite().met).toBe(true)
+    expect(getEmbeddingPrerequisite().summaryModel).toBeNull()
+    expect(getEmbeddingPrerequisite().met).toBe(false)
   })
 })
 

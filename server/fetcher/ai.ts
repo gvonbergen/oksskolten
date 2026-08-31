@@ -3,6 +3,7 @@ import { getProvider } from '../providers/llm/index.js'
 import { googleTranslate } from '../providers/translate/google-translate.js'
 import { deeplTranslate } from '../providers/translate/deepl.js'
 import { TASK_DEFAULTS } from '../../shared/models.js'
+import { getSummaryProviderModel } from '../search/embedding.js'
 import { DEFAULT_LANGUAGE, languageName } from '../../shared/lang.js'
 import { logger } from '../logger.js'
 
@@ -28,8 +29,7 @@ export interface AiTextResult {
  */
 export function shouldAutoSummarizeNow(): boolean {
   if (getSetting('summary.auto') !== 'on') return false
-  const provider = getSetting('summary.provider') || TASK_DEFAULTS.summarize.provider
-  const model = getSetting('summary.model') || TASK_DEFAULTS.summarize.model
+  const { provider, model } = getSummaryProviderModel(getSetting)
   if (!model) return false
   return isReusableSummarizeProvider(provider)
 }
@@ -122,6 +122,7 @@ interface AiTaskConfig {
   maxTokensKey: string
   defaultMaxTokens: number
   buildPrompt: (text: string) => string
+  resolveProviderModel?: () => { provider: string; model: string | null }
 }
 
 /**
@@ -142,8 +143,10 @@ async function runAiTask(
   fullText: string,
   onText?: (delta: string) => void,
 ): Promise<{ text: string } & AiTextResult> {
-  const providerName = getSetting(config.providerKey) || TASK_DEFAULTS.summarize.provider
-  const model = getSetting(config.modelKey) || config.defaultModel
+  const resolved = config.resolveProviderModel?.()
+  const providerName = resolved?.provider || getSetting(config.providerKey) || TASK_DEFAULTS.summarize.provider
+  const model = resolved ? resolved.model : getSetting(config.modelKey) || config.defaultModel
+  if (!model) throw new Error(`${providerName} model is not configured`)
   const provider = getProvider(providerName)
   provider.requireKey()
   const prompt = config.buildPrompt(fullText)
@@ -177,6 +180,7 @@ const summarizeConfig: AiTaskConfig = {
   maxTokensKey: 'summary.max_tokens',
   defaultMaxTokens: SUMMARIZE_MAX_TOKENS,
   buildPrompt: buildSummarizePrompt,
+  resolveProviderModel: () => getSummaryProviderModel(getSetting),
 }
 
 const translateConfig: AiTaskConfig = {

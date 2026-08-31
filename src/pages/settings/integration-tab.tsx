@@ -15,7 +15,7 @@ export function IntegrationTab() {
       <Separator />
       <TaskModelSection settings={settings} t={t} />
       <Separator />
-      <SemanticSearchSection t={t} />
+      <SemanticSearchSection t={t} settings={settings} />
     </>
   )
 }

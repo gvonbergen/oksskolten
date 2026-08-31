@@ -26,6 +26,8 @@ let rebuilding = false
  * between rebuilds.
  */
 let liveEmbedderVerified = false
+let previousEmbeddingPrerequisite: boolean | null = null
+let pendingEmbeddingReconciliation = false
 
 interface RebuildRecord {
   startedAt: number
@@ -53,10 +55,27 @@ export function isSearchReady(): boolean {
  * the live index carries the expected embedder. Everything else (disabled,
  * prerequisite lost, stale index) means keyword-only behavior.
  */
+export function reconcileEmbeddingPrerequisite(previousMet: boolean): void {
+  const prerequisiteMet = isEmbeddingPrerequisiteMet()
+  previousEmbeddingPrerequisite = prerequisiteMet
+  if (getEmbeddingConfig().enabled && previousMet !== prerequisiteMet) {
+    liveEmbedderVerified = false
+    if (rebuilding) pendingEmbeddingReconciliation = true
+    else requestSearchRebuild()
+  }
+}
+
 export function isSemanticReady(): boolean {
   const config = getEmbeddingConfig()
+  const prerequisiteMet = isEmbeddingPrerequisiteMet()
+  if (previousEmbeddingPrerequisite === false && prerequisiteMet && config.enabled) {
+    liveEmbedderVerified = false
+    if (rebuilding) pendingEmbeddingReconciliation = true
+    else requestSearchRebuild()
+  }
+  previousEmbeddingPrerequisite = prerequisiteMet
   if (!config.enabled || !config.provider || !config.model) return false
-  if (!isEmbeddingPrerequisiteMet()) return false
+  if (!prerequisiteMet) return false
   if (config.provider === 'openai' && !config.apiKey) return false
   return liveEmbedderVerified
 }
@@ -80,6 +99,8 @@ export function _setLiveEmbedderVerified(value: boolean): void {
 export function _resetRebuildRecord(): void {
   lastRebuild = null
   statsCache = null
+  previousEmbeddingPrerequisite = null
+  pendingEmbeddingReconciliation = false
 }
 
 // --- Change log for rebuild consistency ---
@@ -268,6 +289,9 @@ export async function rebuildSearchIndex(): Promise<void> {
   } finally {
     changeLog = null
     rebuilding = false
+    const rerun = pendingEmbeddingReconciliation && getEmbeddingConfig().enabled && isEmbeddingPrerequisiteMet()
+    pendingEmbeddingReconciliation = false
+    if (rerun) requestSearchRebuild()
   }
 }
 
@@ -465,7 +489,8 @@ export async function getSearchIndexRuntime(): Promise<SearchIndexRuntime> {
 // --- Fire-and-forget sync helpers ---
 
 export function syncArticleToSearch(doc: MeiliArticleDoc): void {
-  const embeddingDoc = applyEmbeddingVectors(doc)
+  const config = getEmbeddingConfig()
+  const embeddingDoc = applyEmbeddingVectors(doc, config, rebuilding && !buildEmbeddersSettings(config))
   try {
     const client = getSearchClient()
     const index = client.index(ARTICLES_INDEX)
@@ -573,7 +598,9 @@ export async function syncAllScoredArticlesToSearch(): Promise<number> {
 
 export function syncArticlesByFeedToSearch(docs: MeiliArticleDoc[]): void {
   if (docs.length === 0) return
-  const embeddingDocs = docs.map((doc) => applyEmbeddingVectors(doc))
+  const config = getEmbeddingConfig()
+  const forceOptOut = rebuilding && !buildEmbeddersSettings(config)
+  const embeddingDocs = docs.map((doc) => applyEmbeddingVectors(doc, config, forceOptOut))
   try {
     const client = getSearchClient()
     const index = client.index(ARTICLES_INDEX)

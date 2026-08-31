@@ -166,6 +166,12 @@ describe('summarizeArticle', () => {
     expect(result.model).toBe('claude-sonnet-4-6')
   })
 
+  it('does not use the Anthropic default for another selected provider', async () => {
+    mockGetSetting.mockImplementation((key: string) => key === 'summary.provider' ? 'openai' : null)
+    await expect(summarizeArticle('text')).rejects.toThrow('openai model is not configured')
+    expect(mockCreateMessage).not.toHaveBeenCalled()
+  })
+
   it('propagates provider errors', async () => {
     mockCreateMessage.mockRejectedValue(new Error('API rate limit'))
     await expect(summarizeArticle('text')).rejects.toThrow('API rate limit')

@@ -2,6 +2,7 @@ import type { Embedders } from 'meilisearch'
 import { getSetting } from '../db/settings.js'
 import {
   TASK_DEFAULTS,
+  getModelValues,
   EMBEDDING_PROVIDERS,
   type EmbeddingProvider,
 } from '../../shared/models.js'
@@ -86,6 +87,28 @@ export function getEmbeddingConfig(): EmbeddingConfig {
 
 // --- Automatic summarization prerequisite ---
 
+export interface SummaryProviderModel {
+  provider: string
+  model: string | null
+}
+
+export function isSummaryModelValid(provider: string, model: string): boolean {
+  const modelProvider = provider === 'claude-code' ? 'anthropic' : provider
+  const knownModels = getModelValues(modelProvider)
+  return knownModels.length === 0 || knownModels.includes(model)
+}
+
+export function getSummaryProviderModel(readSetting: (key: string) => string | null = getSetting): SummaryProviderModel {
+  const configuredProvider = readSetting('summary.provider')
+  const provider = configuredProvider || TASK_DEFAULTS.summarize.provider
+  const configuredModel = readSetting('summary.model')
+  const candidate = configuredModel || (configuredProvider ? null : TASK_DEFAULTS.summarize.model)
+  return {
+    provider,
+    model: candidate && isSummaryModelValid(provider, candidate) ? candidate : null,
+  }
+}
+
 /** Summary task providers whose configuration the server can verify cheaply. */
 const SUMMARY_EMBEDDING_PREREQUISITE_PROVIDERS = ['anthropic', 'gemini', 'openai', 'ollama', 'vllm'] as const
 
@@ -115,8 +138,7 @@ export function isSummaryProviderConfigured(provider: string): boolean {
  */
 export function isAutoSummaryEnabled(): boolean {
   if (getSetting('summary.auto') !== 'on') return false
-  const provider = getSetting('summary.provider') || TASK_DEFAULTS.summarize.provider
-  const model = getSetting('summary.model') || TASK_DEFAULTS.summarize.model
+  const { provider, model } = getSummaryProviderModel()
   if (!model) return false
   if (!(SUMMARY_EMBEDDING_PREREQUISITE_PROVIDERS as readonly string[]).includes(provider)) return false
   return isSummaryProviderConfigured(provider)
@@ -133,8 +155,7 @@ export interface EmbeddingPrerequisite {
 
 export function getEmbeddingPrerequisite(): EmbeddingPrerequisite {
   const autoSummaryEnabled = getSetting('summary.auto') === 'on'
-  const provider = getSetting('summary.provider') || TASK_DEFAULTS.summarize.provider
-  const model = getSetting('summary.model') || TASK_DEFAULTS.summarize.model
+  const { provider, model } = getSummaryProviderModel()
 
   if (!autoSummaryEnabled) {
     return {
@@ -151,7 +172,7 @@ export function getEmbeddingPrerequisite(): EmbeddingPrerequisite {
       autoSummaryEnabled,
       summaryProvider: provider,
       summaryModel: null,
-      reason: 'A summary model must be selected before semantic search can be enabled',
+      reason: `A valid summary model must be selected for the ${provider} provider before semantic search can be enabled`,
     }
   }
   if (!(SUMMARY_EMBEDDING_PREREQUISITE_PROVIDERS as readonly string[]).includes(provider)) {
@@ -258,9 +279,10 @@ export function matchesExpectedEmbedder(
 export function applyEmbeddingVectors<T extends { summary?: string | null; feed_type?: string }>(
   doc: T,
   config: EmbeddingConfig = getEmbeddingConfig(),
+  forceOptOut = false,
 ): T & { _vectors?: Record<string, null> } {
-  if (!config.enabled) return doc
-  if (!isEmbeddingPrerequisiteMet() || doc.feed_type === 'clip' || !doc.summary?.trim()) {
+  if (!config.enabled && !forceOptOut) return doc
+  if (forceOptOut || !isEmbeddingPrerequisiteMet() || doc.feed_type === 'clip' || !doc.summary?.trim()) {
     return { ...doc, _vectors: { [EMBEDDER_NAME]: null } }
   }
   return doc

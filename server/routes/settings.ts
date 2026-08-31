@@ -15,6 +15,8 @@ import { extractByDotPath } from '../fetcher/article-images.js'
 import { getMonthlyUsage } from '../providers/translate/google-translate.js'
 import { getDeeplMonthlyUsage } from '../providers/translate/deepl.js'
 import { parseOrBadRequest } from '../lib/validation.js'
+import { getEmbeddingPrerequisite } from '../search/embedding.js'
+import { reconcileEmbeddingPrerequisite } from '../search/sync.js'
 
 const ProfileBody = z.object({
   account_name: z.string().optional(),
@@ -185,6 +187,8 @@ export async function settingsRoutes(api: FastifyInstance): Promise<void> {
       return
     }
 
+    const summarySettingChanged = ['summary.auto', 'summary.provider', 'summary.model'].some(key => body[key] !== undefined)
+    const prerequisiteBefore = summarySettingChanged ? getEmbeddingPrerequisite().met : null
     let updated = false
     for (const key of PREF_KEYS) {
       if (body[key] === undefined) continue
@@ -262,6 +266,9 @@ export async function settingsRoutes(api: FastifyInstance): Promise<void> {
     if (!updated) {
       reply.status(400).send({ error: 'No valid fields to update' })
       return
+    }
+    if (summarySettingChanged && prerequisiteBefore !== null) {
+      reconcileEmbeddingPrerequisite(prerequisiteBefore)
     }
     const result: Record<string, string | null> = {}
     for (const key of PREF_KEYS) {
@@ -594,12 +601,15 @@ export async function settingsRoutes(api: FastifyInstance): Promise<void> {
       reply.status(400).send({ error: `Unknown provider: ${provider}` })
       return
     }
+    const prerequisiteBefore = getEmbeddingPrerequisite().met
     const { apiKey } = ApiKeyBody.parse(request.body)
     if (!apiKey || apiKey.trim() === '') {
       deleteSetting(settingKey)
+      reconcileEmbeddingPrerequisite(prerequisiteBefore)
       reply.send({ ok: true, configured: false })
     } else {
       upsertSetting(settingKey, apiKey.trim())
+      reconcileEmbeddingPrerequisite(prerequisiteBefore)
       reply.send({ ok: true, configured: true })
     }
   })

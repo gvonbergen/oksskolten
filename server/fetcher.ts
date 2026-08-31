@@ -249,7 +249,7 @@ async function processArticle(task: ArticleTask): Promise<boolean> {
     })
     // A retry article that just obtained its full text is summarizable
     // now even though it was ingested before the summary existed.
-    if (content.fullText && shouldAutoSummarizeNow() && !task.article.summary) {
+    if (content.fullText && shouldAutoSummarizeNow() && task.article.feed_type !== 'clip' && !task.article.summary?.trim()) {
       void autoSummarizeArticle(task.article.id, content.fullText)
     }
   }

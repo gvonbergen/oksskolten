@@ -144,6 +144,7 @@ describe('syncAllScoredArticlesToSearch', () => {
 describe('article sync embedding policy', () => {
   beforeEach(() => {
     setupTestDb()
+    _setRebuilding(false)
     mockAddDocuments.mockClear()
   })
 
@@ -160,6 +161,30 @@ describe('article sync embedding policy', () => {
       category_id: null,
       title: 'Article',
       summary: null,
+      full_text: 'Body',
+      full_text_translated: '',
+      lang: 'en',
+      published_at: 1,
+      score: 0,
+      is_unread: true,
+      is_liked: false,
+      is_bookmarked: false,
+    }])
+
+    expect(mockAddDocuments.mock.calls[0][0][0]._vectors).toEqual({ 'article-v1': null })
+  })
+
+  it('marks live-index writes as opt-outs during a disabled rebuild', () => {
+    upsertSetting('embedding.enabled', 'off')
+    _setRebuilding(true)
+    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn().mockResolvedValue(undefined) })
+
+    syncArticlesByFeedToSearch([{
+      id: 1,
+      feed_id: 1,
+      category_id: null,
+      title: 'Article',
+      summary: 'Summary',
       full_text: 'Body',
       full_text_translated: '',
       lang: 'en',
@@ -475,6 +500,7 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
 describe('semantic readiness reacts to prerequisite changes at runtime', () => {
   beforeEach(() => {
     setupTestDb()
+    _resetRebuildRecord()
     _setSearchReady(true)
     _setLiveEmbedderVerified(true)
   })
@@ -496,9 +522,9 @@ describe('semantic readiness reacts to prerequisite changes at runtime', () => {
     deleteSetting('summary.auto')
     expect(isSemanticReady()).toBe(false)
 
-    // Re-enabling the prerequisite restores readiness without a rebuild.
+    // Re-enabling the prerequisite requires a fresh coverage rebuild.
     upsertSetting('summary.auto', 'on')
-    expect(isSemanticReady()).toBe(true)
+    expect(isSemanticReady()).toBe(false)
   })
 
   it('stays keyword-only when the provider credential is removed', () => {

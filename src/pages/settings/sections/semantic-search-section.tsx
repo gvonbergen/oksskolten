@@ -11,6 +11,7 @@ import {
   type EmbeddingProvider,
   type EmbeddingModelDef,
 } from '../../../data/aiModels'
+import type { Settings } from '../../../hooks/use-settings'
 
 type TFunc = (key: any, params?: Record<string, string>) => string
 
@@ -36,7 +37,7 @@ interface EmbeddingStatus {
 
 const OLLAMA_DEFAULT_URL = 'http://localhost:11434'
 
-export function SemanticSearchSection({ t }: { t: TFunc }) {
+export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Settings }) {
   const { data: status, mutate } = useSWR<EmbeddingStatus>(
     '/api/settings/search-embedding',
     fetcher,
@@ -54,6 +55,12 @@ export function SemanticSearchSection({ t }: { t: TFunc }) {
     const timer = setInterval(() => { void mutate() }, refreshInterval)
     return () => clearInterval(timer)
   }, [mutate, refreshInterval])
+
+  useEffect(() => {
+    void mutate()
+    const timer = setTimeout(() => { void mutate() }, 600)
+    return () => clearTimeout(timer)
+  }, [mutate, settings.summaryAuto, settings.summaryProvider, settings.summaryModel])
 
   // Local form state (initialized from server once)
   const [provider, setProvider] = useState<EmbeddingProvider | null>(null)
