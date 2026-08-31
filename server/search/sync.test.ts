@@ -36,7 +36,7 @@ vi.mock('./client.js', () => ({
   ARTICLES_STAGING_INDEX: 'articles_staging',
 }))
 
-import { ensureSearchIndex, isSearchReady, isSemanticReady, isRebuilding, syncAllScoredArticlesToSearch, syncArticlesByFeedToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, rebuildSearchIndex, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
+import { ensureSearchIndex, isSearchReady, isSemanticReady, isRebuilding, syncAllScoredArticlesToSearch, syncArticlesByFeedToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, _setSwapRetryDelay, rebuildSearchIndex, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
 import { upsertSetting, deleteSetting } from '../db.js'
 
 function seedFeed(): number {
@@ -352,6 +352,7 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     _setSearchReady(false)
     _setLiveEmbedderVerified(false)
     _resetRebuildRecord()
+    _setSwapRetryDelay(1)
   })
 
   function seedEmbeddingSettings() {
@@ -522,15 +523,52 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     await rebuildSearchIndex()
 
     expect(isSearchReady()).toBe(false)
-    // The rebuild treats the timed-out swap as indeterminate and schedules
-    // the reconciliation rerun right away.
-    expect(isRebuilding()).toBe(true)
+    // The rebuild treats the timed-out swap as indeterminate and schedules a
+    // bounded automatic retry.
+    await vi.waitFor(() => expect(mockSwapIndexes).toHaveBeenCalledTimes(2))
 
     // The reconciliation rerun completes the rebuild safely.
     await vi.waitFor(() => expect(isRebuilding()).toBe(false))
     expect(isSearchReady()).toBe(true)
     const recovered = await getSearchIndexRuntime()
     expect(recovered.lastRebuild?.ok).toBe(true)
+  })
+
+  it('stops after three automatic indeterminate-swap retries and requires a manual rebuild', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/swap-stuck' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockSwapIndexes.mockImplementation(() => ({
+      waitTask: vi.fn().mockRejectedValue(new Error('MeiliSearchTaskTimeOutError: timeout')),
+    }))
+    mockGetStats.mockResolvedValue({ numberOfDocuments: 5 })
+    mockGetSettings.mockResolvedValue({ embedders: null })
+
+    await rebuildSearchIndex()
+
+    // Initial attempt + exactly three automatic retries, then the loop stops.
+    await vi.waitFor(() => expect(mockSwapIndexes).toHaveBeenCalledTimes(4))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(mockSwapIndexes).toHaveBeenCalledTimes(4)
+    expect(isRebuilding()).toBe(false)
+
+    // Bounded re-index/embedding cost: one document batch per attempt.
+    expect(mockAddDocuments).toHaveBeenCalledTimes(4)
+
+    // Keyword search stays available on the live index; semantic does not.
+    expect(isSearchReady()).toBe(true)
+    expect(isSemanticReady()).toBe(false)
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild?.ok).toBe(false)
+    expect(runtime.lastRebuild?.error).toMatch(/manual rebuild/i)
+
+    // A manual rebuild resets the retry budget and succeeds.
+    mockSwapIndexes.mockImplementation(() => ({ waitTask: mockWaitTask }))
+    await rebuildSearchIndex()
+    expect(isSearchReady()).toBe(true)
+    const after = await getSearchIndexRuntime()
+    expect(after.lastRebuild?.ok).toBe(true)
   })
 
   it('disabling embeddings rebuilds without an embedder and drops semantic readiness', async () => {

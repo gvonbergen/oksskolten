@@ -41,6 +41,17 @@ interface RebuildRecord {
 
 let lastRebuild: RebuildRecord | null = null
 
+// Bounded automatic retries for an indeterminate swap (the swap was enqueued
+// but its completion is unknown). After exhaustion the loop stops, the
+// reconciliation state is preserved, and a manual rebuild is required.
+const MAX_INDETERMINATE_SWAP_RETRIES = 3
+const SWAP_RETRY_BASE_DELAY_MS = 5_000
+const SWAP_RETRY_MAX_DELAY_MS = 60_000
+let swapRetriesRemaining = MAX_INDETERMINATE_SWAP_RETRIES
+let swapRetryContinuation = false
+let swapRetryTimer: ReturnType<typeof setTimeout> | null = null
+let swapRetryDelayOverride: number | null = null
+
 // Bounded cache for Meilisearch index stats (documents / embedded documents)
 let statsCache: { documents: number; embeddedDocuments: number; embeddings: number; fetchedAt: number } | null = null
 const STATS_CACHE_TTL_MS = 10_000
@@ -102,6 +113,17 @@ export function _resetRebuildRecord(): void {
   previousEmbeddingPrerequisite = null
   pendingEmbeddingReconciliation = false
   pendingChangeLog = null
+  swapRetriesRemaining = MAX_INDETERMINATE_SWAP_RETRIES
+  swapRetryContinuation = false
+  if (swapRetryTimer) {
+    clearTimeout(swapRetryTimer)
+    swapRetryTimer = null
+  }
+}
+
+/** @internal Test-only helper to pin the indeterminate-swap retry backoff */
+export function _setSwapRetryDelay(ms: number | null): void {
+  swapRetryDelayOverride = ms
 }
 
 // --- Change log for rebuild consistency ---
@@ -175,10 +197,55 @@ function redactSecrets(message: string, secrets: (string | null | undefined)[]):
   return secrets.reduce<string>((safe, secret) => (secret ? safe.split(secret).join('[redacted]') : safe), message)
 }
 
+function scheduleIndeterminateSwapRetry(delay: number): void {
+  swapRetryTimer = setTimeout(() => {
+    swapRetryTimer = null
+    swapRetryContinuation = true
+    void rebuildSearchIndex()
+    swapRetryContinuation = false
+  }, delay)
+}
+
+/**
+ * Bounded retries are exhausted while the swap's completion is still
+ * unknown: stop the automatic loop, keep whichever production index is live
+ * available for keyword search when it holds documents, resolve semantic
+ * readiness against the live settings, and surface a manual-rebuild error.
+ */
+async function recoverAfterSwapRetryExhaustion(): Promise<void> {
+  const message = `${lastRebuild?.error ?? 'Index swap indeterminate'}; index swap stayed indeterminate after ${MAX_INDETERMINATE_SWAP_RETRIES} automatic retries — resolve the Meilisearch issue and trigger a manual rebuild`
+  try {
+    const stats = await getSearchClient().index(ARTICLES_INDEX).getStats()
+    await verifyLiveEmbedder()
+    if (stats.numberOfDocuments > 0) {
+      searchReady = true
+      log.error(`${message}; keyword search remains available on the live index`)
+    } else {
+      log.error(message)
+    }
+  } catch (err) {
+    log.error(message, err)
+  }
+  if (lastRebuild) {
+    lastRebuild = { ...lastRebuild, error: message }
+  }
+}
+
 export async function rebuildSearchIndex(): Promise<void> {
   if (rebuilding) {
     log.info('Rebuild already in progress, skipping')
     return
+  }
+  if (swapRetryContinuation) {
+    swapRetryContinuation = false
+  } else {
+    // Any explicitly triggered rebuild (config change, manual retry, cron)
+    // restarts the bounded-retry budget.
+    swapRetriesRemaining = MAX_INDETERMINATE_SWAP_RETRIES
+    if (swapRetryTimer) {
+      clearTimeout(swapRetryTimer)
+      swapRetryTimer = null
+    }
   }
   rebuilding = true
   liveEmbedderVerified = false
@@ -336,6 +403,7 @@ export async function rebuildSearchIndex(): Promise<void> {
     }
 
     searchReady = true
+    swapRetriesRemaining = MAX_INDETERMINATE_SWAP_RETRIES
     lastRebuild = {
       ...lastRebuild!,
       finishedAt: Date.now(),
@@ -369,10 +437,26 @@ export async function rebuildSearchIndex(): Promise<void> {
   } finally {
     changeLog = null
     rebuilding = false
-    const rerun = pendingChangeLog !== null || (pendingEmbeddingReconciliation && getEmbeddingConfig().enabled && isEmbeddingPrerequisiteMet())
+    const swapIndeterminate = pendingChangeLog !== null
+    if (swapIndeterminate && swapRetriesRemaining > 0) {
+      // The enqueued swap may still complete; rerun reconciliation after a
+      // capped exponential backoff instead of hot-looping full rebuilds.
+      pendingChangeLog = null
+      pendingEmbeddingReconciliation = false
+      const attempt = MAX_INDETERMINATE_SWAP_RETRIES - swapRetriesRemaining + 1
+      swapRetriesRemaining--
+      const delay = swapRetryDelayOverride ?? Math.min(
+        SWAP_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
+        SWAP_RETRY_MAX_DELAY_MS,
+      )
+      log.warn(`Index swap indeterminate; scheduling automatic retry ${attempt}/${MAX_INDETERMINATE_SWAP_RETRIES} in ${delay}ms`)
+      scheduleIndeterminateSwapRetry(delay)
+    } else if (swapIndeterminate) {
+      await recoverAfterSwapRetryExhaustion()
+    }
+    const reconcile = pendingEmbeddingReconciliation && getEmbeddingConfig().enabled && isEmbeddingPrerequisiteMet()
     pendingEmbeddingReconciliation = false
-    pendingChangeLog = null
-    if (rerun) requestSearchRebuild()
+    if (reconcile) requestSearchRebuild()
   }
 }
 
