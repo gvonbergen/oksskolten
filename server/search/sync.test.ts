@@ -36,7 +36,7 @@ vi.mock('./client.js', () => ({
   ARTICLES_STAGING_INDEX: 'articles_staging',
 }))
 
-import { ensureSearchIndex, isSearchReady, isSemanticReady, isRebuilding, syncAllScoredArticlesToSearch, syncArticleFiltersToSearch, syncArticlesByFeedToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, _setSwapRetryDelay, rebuildSearchIndex, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
+import { ensureSearchIndex, isSearchReady, isSemanticReady, isRebuilding, rebuildSearchIndex, requestSearchRebuild, syncAllScoredArticlesToSearch, syncArticleFiltersToSearch, syncArticlesByFeedToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, _setSwapRetryDelay, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
 import { upsertSetting, deleteSetting } from '../db.js'
 
 function seedFeed(): number {
@@ -585,6 +585,41 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     expect(replayed).toEqual([{ id: articleId, is_liked: true }])
     const recovered = await getSearchIndexRuntime()
     expect(recovered.lastRebuild?.ok).toBe(true)
+    mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask }))
+  })
+
+  it('a superseding rebuild failing determinately still re-arms the reconciliation retry', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    const articleId = seedArticle(feedId, { url: 'https://example.com/superseded' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask, catch: vi.fn() }))
+    _setSwapRetryDelay(40)
+    // Rebuild A: swap accepted but the wait times out — indeterminate, retry armed.
+    mockSwapIndexes.mockImplementationOnce(() => ({
+      waitTask: vi.fn().mockRejectedValue(new Error('MeiliSearchTaskTimeOutError: timeout')),
+    }))
+
+    await rebuildSearchIndex()
+
+    // Captured while the retry is pending.
+    syncArticleFiltersToSearch([{ id: articleId, is_liked: true }])
+
+    // Rebuild B (e.g. the 6-hour cron) starts before the retry fires and
+    // fails determinately before its own swap (transient Meilisearch outage).
+    mockGetIndexes.mockRejectedValueOnce(new Error('meili down'))
+    requestSearchRebuild()
+    await vi.waitFor(() => expect(isRebuilding()).toBe(false))
+
+    // The bounded retry must still fire, replay the carried change log, and
+    // converge the index instead of silently dropping the chain.
+    await vi.waitFor(() => expect(mockSwapIndexes.mock.calls.length).toBeGreaterThanOrEqual(2))
+    await vi.waitFor(() => expect(isRebuilding()).toBe(false))
+    expect(isSearchReady()).toBe(true)
+    const recovered = await getSearchIndexRuntime()
+    expect(recovered.lastRebuild?.ok).toBe(true)
+    const replayed = mockUpdateDocuments.mock.calls[mockUpdateDocuments.mock.calls.length - 1][0] as Record<string, unknown>[]
+    expect(replayed).toEqual([{ id: articleId, is_liked: true }])
     mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask }))
   })
 

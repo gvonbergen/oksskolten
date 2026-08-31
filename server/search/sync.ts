@@ -52,6 +52,7 @@ let swapRetriesRemaining = MAX_INDETERMINATE_SWAP_RETRIES
 let swapRetryContinuation = false
 let swapRetryTimer: ReturnType<typeof setTimeout> | null = null
 let swapRetryDelayOverride: number | null = null
+let swapPossiblyInFlight = false
 
 // Bounded cache for Meilisearch index stats (documents / embedded documents)
 let statsCache: { documents: number; embeddedDocuments: number; embeddings: number; fetchedAt: number } | null = null
@@ -116,6 +117,7 @@ export function _resetRebuildRecord(): void {
   pendingChangeLog = null
   swapRetriesRemaining = MAX_INDETERMINATE_SWAP_RETRIES
   swapRetryContinuation = false
+  swapPossiblyInFlight = false
   if (swapRetryTimer) {
     clearTimeout(swapRetryTimer)
     swapRetryTimer = null
@@ -198,7 +200,8 @@ function redactSecrets(message: string, secrets: (string | null | undefined)[]):
   return secrets.reduce<string>((safe, secret) => (secret ? safe.split(secret).join('[redacted]') : safe), message)
 }
 
-function rebuildErrorSecrets(config: { apiKey?: string | null }): (string | null | undefined)[] {
+function rebuildErrorSecrets(config: { apiKey?: string | null }, embedderPlanned: boolean): (string | null | undefined)[] {
+  if (!embedderPlanned) return [config.apiKey]
   const token = getEmbeddingProxyToken()
   return [config.apiKey, token, encodeURIComponent(token)]
 }
@@ -361,13 +364,18 @@ export async function rebuildSearchIndex(): Promise<void> {
       { indexes: [ARTICLES_INDEX, ARTICLES_STAGING_INDEX] } as any,
     ])
     productionSwapped = true
+    swapPossiblyInFlight = true
     try {
       assertTaskOk(await swapTask.waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }), 'staging swap')
+      swapPossiblyInFlight = false
     } catch (err) {
       // A swap task that determinately failed was never committed (the task
       // is atomic), so the previous production index is intact and needs no
       // reconciliation: only a timeout/transport error is indeterminate.
-      if (err instanceof TaskFailedError) productionSwapped = false
+      if (err instanceof TaskFailedError) {
+        productionSwapped = false
+        swapPossiblyInFlight = false
+      }
       throw err
     }
     assertTaskOk(
@@ -445,9 +453,15 @@ export async function rebuildSearchIndex(): Promise<void> {
       searchReady = false
       liveEmbedderVerified = false
       pendingChangeLog = changeLog ? [...changeLog] : []
+    } else if (swapPossiblyInFlight && changeLog && changeLog.length > 0) {
+      // An earlier swap may still commit and promote a snapshot that omits
+      // the captured mutations; preserve them so the bounded retry
+      // reconciles. The live production index is still the known-good
+      // pre-swap one, so keyword search stays available meanwhile.
+      pendingChangeLog = [...changeLog]
     }
     const rawMessage = err instanceof Error ? err.message : String(err)
-    const message = redactSecrets(rawMessage, rebuildErrorSecrets(config))
+    const message = redactSecrets(rawMessage, rebuildErrorSecrets(config, embedderPlanned))
     log.error('Index rebuild failed:', message)
     lastRebuild = {
       startedAt: lastRebuild?.startedAt ?? Date.now(),
@@ -584,7 +598,7 @@ export async function ensureSearchIndex(): Promise<void> {
       // surface the error through the rebuild record shown in the settings
       // API instead of letting startup retries 503 all search.
       if (!(err instanceof TaskFailedError)) throw err
-      const message = redactSecrets(err.message, rebuildErrorSecrets(config))
+      const message = redactSecrets(err.message, rebuildErrorSecrets(config, embedderPlanned))
       log.error('Production settings update failed; search degrades to keyword-only:', message)
       searchReady = true
       liveEmbedderVerified = false
