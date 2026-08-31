@@ -10,7 +10,16 @@ vi.mock('meilisearch', () => ({
   },
 }))
 
-import { searchArticlesWithHybrid } from './client.js'
+import { hasMeaningfulSearchQuery, searchArticlesWithHybrid } from './client.js'
+
+describe('hasMeaningfulSearchQuery', () => {
+  it('requires two letters or numbers and ignores punctuation', () => {
+    expect(hasMeaningfulSearchQuery('!!')).toBe(false)
+    expect(hasMeaningfulSearchQuery('a!')).toBe(false)
+    expect(hasMeaningfulSearchQuery('a1')).toBe(true)
+    expect(hasMeaningfulSearchQuery('日本語')).toBe(true)
+  })
+})
 
 describe('searchArticlesWithHybrid', () => {
   beforeEach(() => {

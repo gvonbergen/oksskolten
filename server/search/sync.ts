@@ -275,8 +275,10 @@ export async function rebuildSearchIndex(): Promise<void> {
     log.info(`Index rebuild complete: ${docs.length} articles in ${elapsed}s${embedderPlanned ? ' (embeddings enabled)' : ''}`)
   } catch (err) {
     // On failure: keep searchReady as-is (true if previously built, false if first time)
-    const message = err instanceof Error ? err.message : String(err)
-    log.error('Index rebuild failed:', err)
+    const rawMessage = err instanceof Error ? err.message : String(err)
+    const secrets = [config.apiKey, getEmbeddingConfig().apiKey].filter((secret): secret is string => !!secret)
+    const message = secrets.reduce((safe, secret) => safe.split(secret).join('[redacted]'), rawMessage)
+    log.error('Index rebuild failed:', message)
     lastRebuild = {
       startedAt: lastRebuild?.startedAt ?? Date.now(),
       finishedAt: Date.now(),
@@ -371,9 +373,8 @@ export async function ensureSearchIndex(): Promise<void> {
     // to the startup retry loop instead so it backs off cleanly.
     const client = getSearchClient()
     const config = getEmbeddingConfig()
-    const startupEmbedders = buildEmbeddersSettings(config) && isEmbeddingPrerequisiteMet()
-      ? buildEmbeddersSettings(config)
-      : {}
+    const embedderPlanned = !!buildEmbeddersSettings(config) && isEmbeddingPrerequisiteMet()
+    const startupEmbedders = embedderPlanned ? buildEmbeddersSettings(config) : {}
     await client.index(ARTICLES_INDEX).updateSettings({
       ...resolveIndexSettings(config),
       embedders: startupEmbedders,
@@ -381,7 +382,7 @@ export async function ensureSearchIndex(): Promise<void> {
     const liveEmbedderMatches = await verifyLiveEmbedder()
     searchReady = true
     const expectedCoverage = getExpectedSearchCoverage()
-    const needsEmbeddingRepair = !!buildEmbeddersSettings(config) && (
+    const needsEmbeddingRepair = embedderPlanned && (
       !liveEmbedderMatches ||
       !expectedCoverage ||
       !populatedStats ||

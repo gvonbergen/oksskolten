@@ -18,6 +18,10 @@ export function getSearchClient(): MeiliSearch {
 export const ARTICLES_INDEX = 'articles'
 export const ARTICLES_STAGING_INDEX = 'articles_staging'
 
+export function hasMeaningfulSearchQuery(query: string): boolean {
+  return (query.match(/[\p{L}\p{N}]/gu)?.length ?? 0) >= 2
+}
+
 export interface MeiliArticleDoc {
   id: number
   feed_id: number

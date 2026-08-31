@@ -437,7 +437,7 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     seedArticle(feedId, { url: 'https://example.com/bad' })
     mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
     mockAddDocuments.mockReturnValueOnce({
-      waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'Embedding generation failed: invalid API key' } }),
+      waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'Embedding generation failed: sk-embedding-test' } }),
     })
 
     await rebuildSearchIndex()
@@ -447,6 +447,7 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     const runtime = await getSearchIndexRuntime()
     expect(runtime.lastRebuild?.ok).toBe(false)
     expect(runtime.lastRebuild?.error).toContain('Embedding generation failed')
+    expect(runtime.lastRebuild?.error).not.toContain('sk-embedding-test')
   })
 
   it('disabling embeddings rebuilds without an embedder and drops semantic readiness', async () => {

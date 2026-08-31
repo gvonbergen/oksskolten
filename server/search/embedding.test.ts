@@ -242,9 +242,18 @@ describe('applyEmbeddingVectors', () => {
     expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: null })
   })
 
-  it('leaves docs untouched when embeddings are disabled', () => {
-    const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: null })
-    expect(doc._vectors).toBeUndefined()
+  it('marks writes as opted out when embeddings are disabled', () => {
+    const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: 'S' })
+    expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: null })
+  })
+
+  it('marks writes as opted out when the embedding credential is absent', () => {
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    deleteSetting('embedding.api_key')
+    const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: 'S' })
+    expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: null })
   })
 })
 

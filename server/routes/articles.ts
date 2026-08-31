@@ -25,7 +25,7 @@ import {
   type ArticleDetail,
 } from '../db.js'
 import type { MeiliArticleDoc } from '../search/client.js'
-import { buildMeiliFilter, searchArticlesWithHybrid } from '../search/client.js'
+import { buildMeiliFilter, hasMeaningfulSearchQuery, searchArticlesWithHybrid } from '../search/client.js'
 import { isSearchReady, isSemanticReady, syncArticleToSearch } from '../search/sync.js'
 import { EMBEDDER_NAME, SEMANTIC_RATIO } from '../search/embedding.js'
 import { requireJson } from '../auth.js'
@@ -272,7 +272,7 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
       // failure falls back to the keyword path inside the client helper and
       // is reported via search_mode instead of returning empty results.
       const hybrid =
-        isSemanticReady() && query.q.trim().length >= 2
+        isSemanticReady() && hasMeaningfulSearchQuery(query.q)
           ? { embedder: EMBEDDER_NAME, semanticRatio: SEMANTIC_RATIO }
           : undefined
       const { hits, estimatedTotalHits, searchMode } = await searchArticlesWithHybrid(query.q, {

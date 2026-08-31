@@ -14,7 +14,7 @@ import {
   type ArticleListItem,
   type ArticleDetail,
 } from '../db.js'
-import { buildMeiliFilter, meiliSearch, searchArticlesWithHybrid } from '../search/client.js'
+import { buildMeiliFilter, hasMeaningfulSearchQuery, meiliSearch, searchArticlesWithHybrid } from '../search/client.js'
 import { isSearchReady, isSemanticReady } from '../search/sync.js'
 import { EMBEDDER_NAME, SEMANTIC_RATIO } from '../search/embedding.js'
 import { summarizeArticle, translateArticle } from '../fetcher.js'
@@ -92,7 +92,7 @@ const searchArticlesTool: ToolDef = {
       const filter = buildMeiliFilter({ feed_id, category_id, since, until, unread, liked, bookmarked })
       const meiliSort = sort ? [`${sort}:desc`] : undefined
       const hybrid =
-        isSemanticReady() && query.trim().length >= 2
+        isSemanticReady() && hasMeaningfulSearchQuery(query)
           ? { embedder: EMBEDDER_NAME, semanticRatio: SEMANTIC_RATIO }
           : undefined
 
