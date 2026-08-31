@@ -50,8 +50,19 @@ function inCidr(address: string, network: string, bits: number): boolean {
 }
 
 function isUnsafeAddress(address: string): boolean {
-  const mapped = address.match(/^::ffff:(\d+(?:\.\d+){3})$/i)?.[1]
-  if (mapped) return isUnsafeAddress(mapped)
+  if (isIP(address) === 6) {
+    // Normalize IPv4-mapped IPv6 (::ffff:0:0/96) in both dotted and hex
+    // notation to its IPv4 form so mapped internal targets like
+    // [::ffff:a9fe:a9fe] (169.254.169.254) are classified, and rejected,
+    // by the IPv4 rules instead of being pinned literally.
+    const value = ipv6Number(address)
+    if (value !== null && (value >> 32n) === 0xffffn) {
+      const v4 = value & 0xffffffffn
+      return isUnsafeAddress(
+        `${(v4 >> 24n) & 0xffn}.${(v4 >> 16n) & 0xffn}.${(v4 >> 8n) & 0xffn}.${v4 & 0xffn}`,
+      )
+    }
+  }
   if (isIP(address) === 4) {
     return [
       ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],

@@ -72,6 +72,15 @@ Stored in the SQLite `settings` table (see [ADR 001](./../adr/001-settings-dual-
   articles, waits for tasks (aborting before the swap if a document batch
   failed, e.g. embedding generation failure), swaps atomically, and deletes the
   old index. Concurrent rebuilds are guarded (`rebuilding` flag + HTTP 409).
+- **Embedding proxy token.** Meilisearch reaches OpenAI-compatible/Ollama
+  endpoints through the app's internal proxy
+  (`/api/internal/embedding-proxy/<token>/...`), and the full URL including the
+  token is persisted in the embedder settings. The token is therefore resolved
+  once and kept stable: explicit `EMBEDDING_PROXY_TOKEN` wins, otherwise the
+  token persisted in `.env` on first start is reused (production deployments
+  should set the variable explicitly — compose passes it through). A changing
+  token would rewrite the embedder URL on every boot and force a full
+  re-embedding.
 - **Query path.** `searchArticlesWithHybrid()` runs the Meilisearch query with
   `hybrid: { embedder: "article-v1", semanticRatio: 0.25 }` only when
   `isSemanticReady()` — enabled + prerequisite met + provider credential

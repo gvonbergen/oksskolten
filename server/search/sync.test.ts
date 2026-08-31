@@ -14,6 +14,7 @@ const mockGetSettings = vi.fn()
 const mockCreateIndex = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockDeleteIndex = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockDeleteDocument = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
+const mockDeleteDocuments = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockSwapIndexes = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 vi.mock('./client.js', () => ({
   getSearchClient: () => ({
@@ -25,6 +26,7 @@ vi.mock('./client.js', () => ({
       getStats: mockGetStats,
       getSettings: mockGetSettings,
       deleteDocument: mockDeleteDocument,
+      deleteDocuments: mockDeleteDocuments,
     }),
     createIndex: mockCreateIndex,
     deleteIndex: mockDeleteIndex,
@@ -34,7 +36,7 @@ vi.mock('./client.js', () => ({
   ARTICLES_STAGING_INDEX: 'articles_staging',
 }))
 
-import { ensureSearchIndex, isSearchReady, isSemanticReady, syncAllScoredArticlesToSearch, syncArticlesByFeedToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, rebuildSearchIndex, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
+import { ensureSearchIndex, isSearchReady, isSemanticReady, isRebuilding, syncAllScoredArticlesToSearch, syncArticlesByFeedToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, rebuildSearchIndex, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
 import { upsertSetting, deleteSetting } from '../db.js'
 
 function seedFeed(): number {
@@ -452,6 +454,55 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     expect(runtime.lastRebuild?.error).not.toContain('sk-embedding-test')
   })
 
+  it('a failed staging settings task aborts before the swap and records the error', async () => {
+    // waitForTask resolves (does not throw) on a failed task, e.g. an invalid
+    // embedder model/dimensions combination, so the rebuild must check the
+    // task status and abort before promoting the embedderless staging index.
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/settings-fail' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockUpdateSettings.mockReturnValueOnce({
+      waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'Invalid embedder configuration: model `nope`' } }),
+    })
+
+    await rebuildSearchIndex()
+
+    expect(mockSwapIndexes).not.toHaveBeenCalled()
+    expect(mockAddDocuments).not.toHaveBeenCalled()
+    expect(isSearchReady()).toBe(false)
+    expect(isSemanticReady()).toBe(false)
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild?.ok).toBe(false)
+    expect(runtime.lastRebuild?.error).toContain('Invalid embedder configuration')
+  })
+
+  it('a failed swap task is treated as indeterminate and reconciliation reruns safely', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/swap-timeout' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    // The swap is accepted but waiting for it times out; the enqueued swap
+    // may still complete later, so the rebuild must not report success and
+    // must schedule a reconciliation rerun instead of discarding state.
+    mockSwapIndexes.mockReturnValueOnce({
+      waitTask: vi.fn().mockRejectedValue(new Error('MeiliSearchTaskTimeOutError: timeout')),
+    })
+
+    await rebuildSearchIndex()
+
+    expect(isSearchReady()).toBe(false)
+    // The rebuild treats the timed-out swap as indeterminate and schedules
+    // the reconciliation rerun right away.
+    expect(isRebuilding()).toBe(true)
+
+    // The reconciliation rerun completes the rebuild safely.
+    await vi.waitFor(() => expect(isRebuilding()).toBe(false))
+    expect(isSearchReady()).toBe(true)
+    const recovered = await getSearchIndexRuntime()
+    expect(recovered.lastRebuild?.ok).toBe(true)
+  })
+
   it('disabling embeddings rebuilds without an embedder and drops semantic readiness', async () => {
     seedEmbeddingSettings()
     const feedId = seedFeed()
@@ -470,7 +521,7 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     const settings = mockUpdateSettings.mock.calls[1][0] as Record<string, unknown>
     expect(settings.embedders).toBeUndefined()
     const docs = mockAddDocuments.mock.calls[0][0] as Record<string, unknown>[]
-    expect(docs[0]._vectors).toBeUndefined()
+    expect(docs[0]._vectors).toEqual({ 'article-v1': null })
     expect(isSemanticReady()).toBe(false)
   })
 

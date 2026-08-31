@@ -7,6 +7,7 @@ import {
   type EmbeddingProvider,
 } from '../../shared/models.js'
 import { getEmbeddingProxyUrl } from './proxy-config.js'
+import { safeEmbeddingRequest } from './endpoint-safety.js'
 
 /**
  * Embedding-assisted search configuration.
@@ -347,54 +348,44 @@ export async function testEmbeddingConnection(config: EmbeddingConfig): Promise<
   const headers: Record<string, string> = { 'content-type': 'application/json' }
 
   try {
+    let url: string
     if (config.provider === 'openai') {
       const base = (config.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '')
-      const openAiHeaders = config.apiKey
-        ? { ...headers, authorization: `Bearer ${config.apiKey}` }
-        : headers
-      const res = await fetch(`${base}/embeddings`, {
-        method: 'POST',
-        headers: openAiHeaders,
-        body: JSON.stringify({ model: config.model, input: probe }),
-        redirect: 'error',
-        signal: AbortSignal.timeout(10_000),
-      })
-      if (!res.ok) {
-        const text = await res.text().catch(() => '')
-        return { ok: false, error: `Embedding request failed (HTTP ${res.status}): ${text.slice(0, 300)}` }
-      }
-      const data = (await res.json()) as { data?: Array<{ embedding?: number[] }> }
-      const dimensions = data.data?.[0]?.embedding?.length
-      if (!dimensions) return { ok: false, error: 'Unexpected embedder response: no embedding returned' }
-      if (config.dimensions != null && dimensions !== config.dimensions) {
-        return { ok: false, error: `Vector dimension mismatch: provider returned ${dimensions}, configured ${config.dimensions}` }
-      }
-      return { ok: true, provider: config.provider, model: config.model, dimensions }
-    }
-    if (config.provider === 'ollama') {
+      url = `${base}/embeddings`
+      if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`
+    } else if (config.provider === 'ollama') {
       const base = (config.baseUrl || 'http://localhost:11434').replace(/\/+$/, '')
-      const res = await fetch(`${base}/api/embed`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ model: config.model, input: probe }),
-        redirect: 'error',
-        signal: AbortSignal.timeout(10_000),
-      })
-      if (!res.ok) {
-        const text = await res.text().catch(() => '')
-        return { ok: false, error: `Embedding request failed (HTTP ${res.status}): ${text.slice(0, 300)}` }
-      }
-      const data = (await res.json()) as { embeddings?: number[][] }
-      const dimensions = data.embeddings?.[0]?.length
-      if (!dimensions) return { ok: false, error: 'Unexpected embedder response: no embedding returned' }
-      if (config.dimensions != null && dimensions !== config.dimensions) {
-        return { ok: false, error: `Vector dimension mismatch: provider returned ${dimensions}, configured ${config.dimensions}` }
-      }
-      return { ok: true, provider: config.provider, model: config.model, dimensions }
+      url = `${base}/api/embed`
+    } else {
+      return { ok: false, error: 'Unknown embedding provider' }
     }
+
+    // Probes go through the same DNS-pinned, redirect-validating request
+    // helper as the proxy boundary: validating the base_url once and then
+    // fetching directly would let a rebinding hostname reach internal
+    // targets on the actual request.
+    const res = await safeEmbeddingRequest(url, JSON.stringify({ model: config.model, input: probe }), headers)
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      const text = res.body.toString('utf8').slice(0, 300)
+      return { ok: false, error: `Embedding request failed (HTTP ${res.statusCode}): ${text}` }
+    }
+    let data: unknown
+    try {
+      data = JSON.parse(res.body.toString('utf8'))
+    } catch {
+      return { ok: false, error: 'Unexpected embedder response: invalid JSON' }
+    }
+    const embedding = config.provider === 'openai'
+      ? (data as { data?: Array<{ embedding?: number[] }> }).data?.[0]?.embedding
+      : (data as { embeddings?: number[][] }).embeddings?.[0]
+    const dimensions = embedding?.length
+    if (!dimensions) return { ok: false, error: 'Unexpected embedder response: no embedding returned' }
+    if (config.dimensions != null && dimensions !== config.dimensions) {
+      return { ok: false, error: `Vector dimension mismatch: provider returned ${dimensions}, configured ${config.dimensions}` }
+    }
+    return { ok: true, provider: config.provider, model: config.model, dimensions }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     return { ok: false, error: message }
   }
-  return { ok: false, error: 'Unknown embedding provider' }
 }

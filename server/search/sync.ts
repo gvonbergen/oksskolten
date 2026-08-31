@@ -151,6 +151,24 @@ const BATCH_SIZE = 1000
 // typical queue depth at ~10k articles; revisit if dataset grows further.
 const MEILI_TASK_TIMEOUT_MS = 300_000
 
+interface TaskLike {
+  status?: string
+  uid?: number
+  error?: { message?: string } | null
+}
+
+/**
+ * waitForTask resolves (rather than throws) when the enqueued task itself
+ * fails, so every lifecycle task must have its final status checked before
+ * the rebuild may proceed to the next step (or promote the staging index).
+ */
+function assertTaskOk(task: TaskLike | null | undefined, what: string): void {
+  if (task && task.status === 'failed') {
+    const message = task.error?.message || `task ${task.uid ?? ''} failed`
+    throw new Error(`Meilisearch ${what} failed: ${message}`)
+  }
+}
+
 export async function rebuildSearchIndex(): Promise<void> {
   if (rebuilding) {
     log.info('Rebuild already in progress, skipping')
@@ -184,13 +202,22 @@ export async function rebuildSearchIndex(): Promise<void> {
 
     // 1. Create or reset staging index
     if (indexSet.has(ARTICLES_STAGING_INDEX)) {
-      await client.deleteIndex(ARTICLES_STAGING_INDEX).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+      assertTaskOk(
+        await client.deleteIndex(ARTICLES_STAGING_INDEX).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }),
+        'staging index cleanup',
+      )
     }
-    await client.createIndex(ARTICLES_STAGING_INDEX, { primaryKey: 'id' }).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+    assertTaskOk(
+      await client.createIndex(ARTICLES_STAGING_INDEX, { primaryKey: 'id' }).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }),
+      'staging index creation',
+    )
 
     // 2. Apply index settings (including the managed embedder) to staging
     const stagingIndex = client.index(ARTICLES_STAGING_INDEX)
-    await stagingIndex.updateSettings(settings).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+    assertTaskOk(
+      await stagingIndex.updateSettings(settings).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }),
+      'staging settings update',
+    )
 
     // 3. Fetch all articles from SQLite and batch-insert into staging
     const rows = getDb().prepare(`
@@ -220,63 +247,83 @@ export async function rebuildSearchIndex(): Promise<void> {
 
     for (let i = 0; i < docs.length; i += BATCH_SIZE) {
       const batch = docs.slice(i, i + BATCH_SIZE)
-      const task = await stagingIndex.addDocuments(batch).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
       // A failed document task with an embedder configured means embedding
       // generation is broken (bad credential, provider outage, dimension
       // mismatch). Abort before the swap so the previous production index
       // stays usable for both keyword and semantic search instead of
       // promoting an index that was never built.
-      if (task && task.status === 'failed') {
-        const message = task.error?.message || `document batch task ${task.uid} failed`
-        throw new Error(`Meilisearch document indexing failed: ${message}`)
-      }
+      assertTaskOk(
+        await stagingIndex.addDocuments(batch).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }),
+        'document indexing',
+      )
       lastRebuild = { ...lastRebuild!, processedDocuments: Math.min(i + batch.length, docs.length) }
     }
 
     // 4. Promote staging to production
-    if (indexSet.has(ARTICLES_INDEX)) {
-      // Swap articles <-> articles_staging, then clean up old data
-      await client.swapIndexes([
-        { indexes: [ARTICLES_INDEX, ARTICLES_STAGING_INDEX] } as any,
-      ]).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
-      productionSwapped = true
-      await client.deleteIndex(ARTICLES_STAGING_INDEX).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
-    } else {
+    if (!indexSet.has(ARTICLES_INDEX)) {
       // First run: no existing articles index — create empty one for swap
-      await client.createIndex(ARTICLES_INDEX, { primaryKey: 'id' }).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
-      await client.swapIndexes([
-        { indexes: [ARTICLES_INDEX, ARTICLES_STAGING_INDEX] } as any,
-      ]).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
-      productionSwapped = true
-      await client.deleteIndex(ARTICLES_STAGING_INDEX).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+      assertTaskOk(
+        await client.createIndex(ARTICLES_INDEX, { primaryKey: 'id' }).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }),
+        'production index creation',
+      )
     }
+    // Swap articles <-> articles_staging, then clean up old data. The swap is
+    // committed server-side as soon as it is enqueued, so mark it in-flight
+    // BEFORE waiting: if waitTask times out under queue pressure the swap
+    // may still complete later, and the change log must be preserved for a
+    // reconciliation rerun instead of being discarded.
+    const swapTask = client.swapIndexes([
+      { indexes: [ARTICLES_INDEX, ARTICLES_STAGING_INDEX] } as any,
+    ])
+    productionSwapped = true
+    assertTaskOk(await swapTask.waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }), 'staging swap')
+    assertTaskOk(
+      await client.deleteIndex(ARTICLES_STAGING_INDEX).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }),
+      'staging index cleanup',
+    )
 
     liveEmbedderVerified = embedderPlanned ? await verifyLiveEmbedder() : false
 
-    // 5. Replay change log
+    // 5. Replay change log. Entries are submitted in batches of consecutive
+    // same-action runs: a rebuild overlapping the score recalculation cron
+    // can capture thousands of score entries, and one awaited task per entry
+    // would keep `rebuilding` set and search unready for hours.
     if (changeLog && changeLog.length > 0) {
       const prodIndex = client.index(ARTICLES_INDEX)
-      for (const entry of changeLog) {
-        if (entry.action === 'upsert') {
-          const task = await prodIndex.addDocuments([entry.doc]).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
-          if (task && task.status === 'failed') {
-            const message = task.error?.message || `replay document task ${task.uid} failed`
-            throw new Error(`Meilisearch replay indexing failed: ${message}`)
+      let i = 0
+      while (i < changeLog.length) {
+        const action = changeLog[i].action
+        let end = i
+        while (end < changeLog.length && changeLog[end].action === action) end++
+        const run = changeLog.slice(i, end)
+        i = end
+        if (action === 'upsert') {
+          for (let b = 0; b < run.length; b += BATCH_SIZE) {
+            const batch = run.slice(b, b + BATCH_SIZE).map(e => (e as Extract<ChangeEntry, { action: 'upsert' }>).doc)
+            assertTaskOk(
+              await prodIndex.addDocuments(batch).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }),
+              'replay document indexing',
+            )
           }
-        } else if (entry.action === 'delete') {
-          const task = await prodIndex.deleteDocument(entry.id).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
-          if (task && task.status === 'failed') {
-            const message = task.error?.message || `replay delete task ${task.uid} failed`
-            throw new Error(`Meilisearch replay indexing failed: ${message}`)
+        } else if (action === 'delete') {
+          for (let b = 0; b < run.length; b += BATCH_SIZE) {
+            const ids = run.slice(b, b + BATCH_SIZE).map(e => (e as Extract<ChangeEntry, { action: 'delete' }>).id)
+            assertTaskOk(
+              await prodIndex.deleteDocuments(ids).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }),
+              'replay deletion',
+            )
           }
         } else {
-          const update = entry.action === 'score'
-            ? { id: entry.id, score: entry.score }
-            : entry.update
-          const task = await prodIndex.updateDocuments([update]).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
-          if (task && task.status === 'failed') {
-            const message = task.error?.message || `replay ${entry.action} task ${task.uid} failed`
-            throw new Error(`Meilisearch replay indexing failed: ${message}`)
+          for (let b = 0; b < run.length; b += BATCH_SIZE) {
+            const batch = run.slice(b, b + BATCH_SIZE).map(e =>
+              e.action === 'score'
+                ? { id: (e as Extract<ChangeEntry, { action: 'score' }>).id, score: (e as Extract<ChangeEntry, { action: 'score' }>).score }
+                : (e as Extract<ChangeEntry, { action: 'filters' }>).update,
+            )
+            assertTaskOk(
+              await prodIndex.updateDocuments(batch).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }),
+              'replay document update',
+            )
           }
         }
       }
@@ -402,10 +449,13 @@ export async function ensureSearchIndex(): Promise<void> {
     const config = getEmbeddingConfig()
     const embedderPlanned = !!buildEmbeddersSettings(config) && isEmbeddingPrerequisiteMet()
     const startupEmbedders = embedderPlanned ? buildEmbeddersSettings(config) : {}
-    await client.index(ARTICLES_INDEX).updateSettings({
-      ...resolveIndexSettings(config),
-      embedders: startupEmbedders,
-    }).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+    assertTaskOk(
+      await client.index(ARTICLES_INDEX).updateSettings({
+        ...resolveIndexSettings(config),
+        embedders: startupEmbedders,
+      }).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS }),
+      'production settings update',
+    )
     const liveEmbedderMatches = await verifyLiveEmbedder()
     searchReady = true
     const expectedCoverage = getExpectedSearchCoverage()

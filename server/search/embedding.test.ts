@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { setupTestDb } from '../__tests__/helpers/testDb.js'
 import { upsertSetting, deleteSetting } from '../db.js'
 import {
@@ -258,79 +260,112 @@ describe('applyEmbeddingVectors', () => {
 })
 
 describe('testEmbeddingConnection', () => {
-  const mockFetch = vi.fn()
+  // The probe runs through the pinned, redirect-validating request helper
+  // (node:http), so these tests execute the real request path against a
+  // local HTTP server instead of stubbing global fetch.
+  interface StubRequest { url: string | undefined; headers: http.IncomingHttpHeaders; body: string }
+  let requests: StubRequest[]
+  let respond: (req: http.IncomingMessage, res: http.ServerResponse) => void
+  let server: http.Server
+  let baseUrl: string
 
-  beforeEach(() => {
+  beforeEach(async () => {
     setupTestDb()
-    mockFetch.mockReset()
-    vi.stubGlobal('fetch', mockFetch)
+    requests = []
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ embedding: new Array(1536).fill(0.1) }] }))
+    }
+    server = http.createServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', c => chunks.push(c))
+      req.on('end', () => {
+        requests.push({ url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString('utf8') })
+        respond(req, res)
+      })
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
   })
 
-  afterEach(() => {
-    vi.unstubAllGlobals()
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()))
   })
 
   it('validates an OpenAI-compatible endpoint and reports dimensions', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: [{ embedding: new Array(1536).fill(0.1) }] }),
-    })
-    const result = await testEmbeddingConnection(openaiConfig())
+    const result = await testEmbeddingConnection(openaiConfig({ baseUrl: `${baseUrl}/v1`, apiKey: null }))
     expect(result.ok).toBe(true)
     expect(result.dimensions).toBe(1536)
-    const url = mockFetch.mock.calls[0][0] as string
-    expect(url).toBe('https://api.openai.com/v1/embeddings')
+    expect(requests[0].url).toBe('/v1/embeddings')
+    const sent = JSON.parse(requests[0].body) as { model: string; input: string }
+    expect(sent.model).toBe('text-embedding-3-small')
+    expect(typeof sent.input).toBe('string')
+  })
+
+  it('sends the bearer credential to OpenAI-compatible endpoints', async () => {
+    await testEmbeddingConnection(openaiConfig({ baseUrl: `${baseUrl}/v1` }))
+    expect(requests[0].headers.authorization).toBe('Bearer sk-test-123')
   })
 
   it('reports provider errors', async () => {
-    mockFetch.mockResolvedValue({ ok: false, status: 401, text: async () => 'Incorrect API key' })
-    const result = await testEmbeddingConnection(openaiConfig())
+    respond = (_req, res) => {
+      res.writeHead(401, { 'content-type': 'text/plain' })
+      res.end('Incorrect API key')
+    }
+    const result = await testEmbeddingConnection(openaiConfig({ baseUrl: `${baseUrl}/v1`, apiKey: null }))
     expect(result.ok).toBe(false)
     expect(result.error).toContain('401')
+    expect(result.error).toContain('Incorrect API key')
   })
 
   it('flags dimension mismatch', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: [{ embedding: new Array(512).fill(0.1) }] }),
-    })
-    const result = await testEmbeddingConnection(openaiConfig({ dimensions: 1536 }))
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ embedding: new Array(512).fill(0.1) }] }))
+    }
+    const result = await testEmbeddingConnection(openaiConfig({ baseUrl: `${baseUrl}/v1`, apiKey: null }))
     expect(result.ok).toBe(false)
     expect(result.error).toMatch(/dimension/i)
   })
 
   it('validates an Ollama endpoint via /api/embed', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ embeddings: [new Array(768).fill(0.1)] }),
-    })
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ embeddings: [new Array(768).fill(0.1)] }))
+    }
     const result = await testEmbeddingConnection({
       enabled: true,
       provider: 'ollama',
       model: 'nomic-embed-text',
       dimensions: null,
-      baseUrl: 'http://localhost:11434',
+      baseUrl,
       apiKey: null,
     })
     expect(result.ok).toBe(true)
     expect(result.dimensions).toBe(768)
-    expect(mockFetch.mock.calls[0][0] as string).toBe('http://localhost:11434/api/embed')
+    expect(requests[0].url).toBe('/api/embed')
   })
 
   it('does not send an embedding credential to Ollama', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ embeddings: [new Array(768).fill(0.1)] }),
-    })
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ embeddings: [new Array(768).fill(0.1)] }))
+    }
     await testEmbeddingConnection({
       enabled: true,
       provider: 'ollama',
       model: 'nomic-embed-text',
       dimensions: null,
-      baseUrl: 'http://localhost:11434',
+      baseUrl,
       apiKey: 'sk-openai-secret',
     })
-    expect(mockFetch.mock.calls[0][1].headers).not.toHaveProperty('authorization')
+    expect(requests[0].headers).not.toHaveProperty('authorization')
+  })
+
+  it('refuses a probe to a private address over HTTP', async () => {
+    const result = await testEmbeddingConnection(openaiConfig({ baseUrl: 'http://10.0.0.5:8080/v1', apiKey: null }))
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/loopback/i)
   })
 
   it('requires provider and model', async () => {
