@@ -34,7 +34,7 @@ interface EmbeddingStatus {
   index: { documents: number | null; embeddedDocuments: number | null; embeddings: number | null } | null
 }
 
-const OLLAMA_DEFAULT_URL = 'http://host.docker.internal:11434'
+const OLLAMA_DEFAULT_URL = 'http://localhost:11434'
 
 export function SemanticSearchSection({ t }: { t: TFunc }) {
   const { data: status, mutate } = useSWR<EmbeddingStatus>(
@@ -50,6 +50,7 @@ export function SemanticSearchSection({ t }: { t: TFunc }) {
   // shows up without a manual refresh.
   const refreshInterval = enabled || rebuilding ? 5000 : 0
   useEffect(() => {
+    if (refreshInterval === 0) return
     const timer = setInterval(() => { void mutate() }, refreshInterval)
     return () => clearInterval(timer)
   }, [mutate, refreshInterval])

@@ -219,6 +219,15 @@ describe('applyEmbeddingVectors', () => {
     expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: null })
   })
 
+  it('treats whitespace-only summaries as missing', () => {
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-x')
+    const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: '   ' })
+    expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: null })
+  })
+
   it('leaves docs untouched when embeddings are disabled', () => {
     const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: null })
     expect(doc._vectors).toBeUndefined()

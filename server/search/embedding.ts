@@ -260,7 +260,7 @@ export function applyEmbeddingVectors<T extends { summary?: string | null; feed_
   config: EmbeddingConfig = getEmbeddingConfig(),
 ): T & { _vectors?: Record<string, null> } {
   if (!config.enabled) return doc
-  if (doc.feed_type !== 'clip' && doc.summary) return doc
+  if (doc.feed_type !== 'clip' && doc.summary?.trim()) return doc
   return { ...doc, _vectors: { [EMBEDDER_NAME]: null } }
 }
 

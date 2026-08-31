@@ -277,6 +277,11 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     mockGetIndexes.mockReset()
     mockGetStats.mockReset()
     mockGetSettings.mockReset()
+    mockGetSettings.mockResolvedValue({
+      embedders: {
+        'article-v1': { source: 'openAi', model: 'text-embedding-3-small', dimensions: 1536, documentTemplate: '{{doc.title}}\n\n{{doc.summary}}', apiKey: 'sk-live-copy' },
+      },
+    })
     mockCreateIndex.mockClear()
     mockDeleteIndex.mockClear()
     mockAddDocuments.mockClear()
@@ -371,6 +376,20 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     expect(isSearchReady()).toBe(true)
     // The live index carries the expected embedder (secrets stripped in the comparison)
     expect(isSemanticReady()).toBe(true)
+  })
+
+  it('startup reconciliation clears a stale embedder when embeddings are disabled', async () => {
+    seedEmbeddingSettings()
+    upsertSetting('embedding.enabled', 'off')
+    const feedId = seedFeed()
+    for (let i = 0; i < 7; i++) seedArticle(feedId, { url: `https://example.com/disabled-${i}` })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockGetStats.mockResolvedValue({ numberOfDocuments: 7 })
+
+    await ensureSearchIndex()
+
+    expect(mockUpdateSettings.mock.calls[0][0]).toMatchObject({ embedders: {} })
+    expect(isSemanticReady()).toBe(false)
   })
 
   it('semantic readiness stays false when the live index lacks the expected embedder', async () => {

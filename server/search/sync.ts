@@ -130,6 +130,7 @@ export async function rebuildSearchIndex(): Promise<void> {
     return
   }
   rebuilding = true
+  liveEmbedderVerified = false
   changeLog = []
   const config = getEmbeddingConfig()
   const settings = resolveIndexSettings(config)
@@ -234,7 +235,7 @@ export async function rebuildSearchIndex(): Promise<void> {
     }
 
     searchReady = true
-    liveEmbedderVerified = embedderPlanned
+    liveEmbedderVerified = embedderPlanned ? await verifyLiveEmbedder() : false
     lastRebuild = {
       ...lastRebuild!,
       finishedAt: Date.now(),
@@ -341,11 +342,13 @@ export async function ensureSearchIndex(): Promise<void> {
     // "Index articles_staging already exists" pile-up. Surface the error
     // to the startup retry loop instead so it backs off cleanly.
     const client = getSearchClient()
-    await client.index(ARTICLES_INDEX).updateSettings(resolveIndexSettings()).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
+    const config = getEmbeddingConfig()
+    await client.index(ARTICLES_INDEX).updateSettings({
+      ...resolveIndexSettings(config),
+      embedders: buildEmbeddersSettings(config) ?? {},
+    }).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
     const liveEmbedderMatches = await verifyLiveEmbedder()
     searchReady = true
-
-    const config = getEmbeddingConfig()
     const expectedCoverage = getExpectedSearchCoverage()
     const needsEmbeddingRepair = !!buildEmbeddersSettings(config) && (
       !liveEmbedderMatches ||
@@ -359,7 +362,7 @@ export async function ensureSearchIndex(): Promise<void> {
       log.warn('Search index embedding coverage is incomplete; scheduled a repair rebuild')
     }
 
-    log.info(`Search index already populated (${populatedDocCount} docs); skipping startup rebuild`)
+    log.info(`Search index already populated (${populatedDocCount} docs); skipping full startup rebuild`)
     return
   }
 
