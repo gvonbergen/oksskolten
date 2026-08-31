@@ -30,7 +30,7 @@ interface EmbeddingStatus {
   }
   semantic_ready: boolean
   rebuilding: boolean
-  last_rebuild: { startedAt: number; finishedAt: number | null; ok: boolean | null; error: string | null; documents: number | null } | null
+  last_rebuild: { startedAt: number; finishedAt: number | null; ok: boolean | null; error: string | null; documents: number | null; processedDocuments?: number; totalDocuments?: number | null } | null
   index: { documents: number | null; embeddedDocuments: number | null; embeddings: number | null } | null
 }
 
@@ -198,6 +198,7 @@ export function SemanticSearchSection({ t }: { t: TFunc }) {
   const ready = status?.semantic_ready ?? false
   const index = status?.index
   const lastError = status?.last_rebuild && status.last_rebuild.ok === false ? status.last_rebuild.error : null
+  const rebuildProgress = lastRebuildProgress(status?.last_rebuild)
 
   const privacyUrl = provider === 'ollama' ? (baseUrlInput || OLLAMA_DEFAULT_URL) : ''
 
@@ -231,7 +232,7 @@ export function SemanticSearchSection({ t }: { t: TFunc }) {
               key={opt}
               type="button"
               onClick={() => handleEnable(opt)}
-              disabled={saving || (opt === 'on' && (prerequisiteUnmet || apiKeyMissingForOpenai(status, provider, apiKeyInput)))}
+              disabled={saving || rebuilding || (opt === 'on' && (prerequisiteUnmet || apiKeyMissingForOpenai(status, provider, apiKeyInput)))}
               aria-pressed={enabled === (opt === 'on')}
               className={`px-3 py-1.5 text-xs rounded transition-colors select-none disabled:opacity-40 ${
                 enabled === (opt === 'on')
@@ -257,8 +258,7 @@ export function SemanticSearchSection({ t }: { t: TFunc }) {
       </div>
 
       {/* Configuration */}
-      {enabled && (
-        <>
+      <>
           {/* Privacy warning — shown before/with activation, provider-specific */}
           {provider === 'openai' && (
             <div className="flex items-start gap-2 rounded-md bg-bg-card border border-border px-3 py-2 text-xs text-muted">
@@ -356,7 +356,7 @@ export function SemanticSearchSection({ t }: { t: TFunc }) {
                     <button
                       type="button"
                       onClick={handleSaveKey}
-                      disabled={saving}
+                      disabled={saving || rebuilding}
                       className="px-3 py-1.5 text-xs font-medium rounded-lg bg-accent text-accent-text hover:opacity-90 transition-opacity disabled:opacity-50 select-none shrink-0"
                     >
                       {t('settings.semanticSave')}
@@ -369,7 +369,7 @@ export function SemanticSearchSection({ t }: { t: TFunc }) {
                     <button
                       type="button"
                       onClick={handleDeleteKey}
-                      disabled={saving}
+                      disabled={saving || rebuilding}
                       className="px-3 py-1.5 text-xs rounded-lg border border-border text-muted hover:text-text hover:bg-hover transition-colors disabled:opacity-50 select-none shrink-0"
                     >
                       {t('settings.semanticApiKeyDelete')}
@@ -387,7 +387,7 @@ export function SemanticSearchSection({ t }: { t: TFunc }) {
                 <button
                   type="button"
                   onClick={handleSaveConfig}
-                  disabled={saving}
+                  disabled={saving || rebuilding}
                   className="px-3 py-1.5 text-xs font-medium rounded-lg bg-accent text-accent-text hover:opacity-90 transition-opacity disabled:opacity-50 select-none"
                 >
                   {saving ? '...' : t('settings.semanticSave')}
@@ -417,7 +417,14 @@ export function SemanticSearchSection({ t }: { t: TFunc }) {
 
             {/* Readiness / progress / errors */}
             <div className="rounded-md bg-bg-subtle px-3 py-2 text-xs text-muted space-y-1">
-              {rebuilding && <p className="flex items-center gap-1.5 text-accent"><RefreshCw size={12} className="animate-spin" /> {t('settings.semanticRebuilding')}</p>}
+              {rebuilding && (
+                <>
+                  <p className="flex items-center gap-1.5 text-accent"><RefreshCw size={12} className="animate-spin" /> {t('settings.semanticRebuilding')}</p>
+                  {rebuildProgress && (
+                    <p>{t('settings.semanticRebuildProgress', rebuildProgress)}</p>
+                  )}
+                </>
+              )}
               {!rebuilding && index != null && index.documents != null && (
                 <p>
                   {t('settings.semanticEmbeddedProgress', {
@@ -434,7 +441,6 @@ export function SemanticSearchSection({ t }: { t: TFunc }) {
             </div>
           </div>
         </>
-      )}
 
       {message && (
         <p className={`text-xs ${message.type === 'error' ? 'text-error' : 'text-accent'}`}>{message.text}</p>
@@ -451,6 +457,14 @@ export function SemanticSearchSection({ t }: { t: TFunc }) {
       )}
     </section>
   )
+}
+
+function lastRebuildProgress(lastRebuild: EmbeddingStatus['last_rebuild']): { processed: string; total: string } | null {
+  if (!lastRebuild || lastRebuild.totalDocuments == null) return null
+  return {
+    processed: String(lastRebuild.processedDocuments ?? 0),
+    total: String(lastRebuild.totalDocuments),
+  }
 }
 
 function apiKeyMissingForOpenai(status: EmbeddingStatus | undefined, provider: EmbeddingProvider | null, apiKeyInput: string): boolean {

@@ -16,17 +16,18 @@ export function normalizeUrl(raw: string): string {
 
 function buildMeiliDoc(id: number): MeiliArticleDoc | null {
   const row = getDb().prepare(`
-    SELECT id, feed_id, category_id, title,
-           summary,
-           COALESCE(full_text, '') AS full_text,
-           COALESCE(full_text_translated, '') AS full_text_translated,
-           lang,
-           COALESCE(CAST(strftime('%s', published_at) AS INTEGER), 0) AS published_at,
-           COALESCE(score, 0) AS score,
-           (seen_at IS NULL) AS is_unread,
-           (liked_at IS NOT NULL) AS is_liked,
-           (bookmarked_at IS NOT NULL) AS is_bookmarked
-    FROM articles WHERE id = ?
+    SELECT a.id, a.feed_id, a.category_id, a.title,
+           a.summary,
+           f.type AS feed_type,
+           COALESCE(a.full_text, '') AS full_text,
+           COALESCE(a.full_text_translated, '') AS full_text_translated,
+           a.lang,
+           COALESCE(CAST(strftime('%s', a.published_at) AS INTEGER), 0) AS published_at,
+           COALESCE(a.score, 0) AS score,
+           (a.seen_at IS NULL) AS is_unread,
+           (a.liked_at IS NOT NULL) AS is_liked,
+           (a.bookmarked_at IS NOT NULL) AS is_bookmarked
+    FROM articles a JOIN feeds f ON f.id = a.feed_id WHERE a.id = ?
   `).get(id) as MeiliArticleDoc | undefined
   if (!row) return null
   return applyEmbeddingVectors(row)

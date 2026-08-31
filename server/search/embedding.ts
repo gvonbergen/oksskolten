@@ -249,17 +249,18 @@ export function matchesExpectedEmbedder(
  * Attach `_vectors` to a document when embedding is enabled but the
  * article has no summary yet. Meilisearch treats a null embedder entry as
  * "this document has no embeddings" and skips automatic generation, so we
- * never send title-only vectors for un-summarized articles. Summarized
- * documents carry no `_vectors` field and are embedded automatically from
- * the template; a later summary update re-upserts the document and
- * regenerates the vector idempotently.
+ * never send title-only vectors for un-summarized articles. Manually clipped
+ * articles are always skipped, even if they have a summary. Other summarized
+ * documents carry no `_vectors` field and are embedded automatically from the
+ * template; a later summary update re-upserts the document and regenerates
+ * the vector idempotently.
  */
-export function applyEmbeddingVectors<T extends { summary?: string | null }>(
+export function applyEmbeddingVectors<T extends { summary?: string | null; feed_type?: string }>(
   doc: T,
   config: EmbeddingConfig = getEmbeddingConfig(),
 ): T & { _vectors?: Record<string, null> } {
   if (!config.enabled) return doc
-  if (doc.summary) return doc
+  if (doc.feed_type !== 'clip' && doc.summary) return doc
   return { ...doc, _vectors: { [EMBEDDER_NAME]: null } }
 }
 

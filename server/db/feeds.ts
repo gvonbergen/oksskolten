@@ -141,16 +141,18 @@ export function updateFeed(
   // Meilisearch sync outside transaction (external service, best-effort)
   if (data.category_id !== undefined) {
     const docs = getDb().prepare(`
-      SELECT id, feed_id, category_id, title,
-             COALESCE(full_text, '') AS full_text,
-             COALESCE(full_text_translated, '') AS full_text_translated,
-             lang,
-             COALESCE(CAST(strftime('%s', published_at) AS INTEGER), 0) AS published_at,
-             COALESCE(score, 0) AS score,
-             (seen_at IS NULL) AS is_unread,
-             (liked_at IS NOT NULL) AS is_liked,
-             (bookmarked_at IS NOT NULL) AS is_bookmarked
-      FROM active_articles WHERE feed_id = ?
+      SELECT a.id, a.feed_id, a.category_id, a.title,
+             a.summary,
+             f.type AS feed_type,
+             COALESCE(a.full_text, '') AS full_text,
+             COALESCE(a.full_text_translated, '') AS full_text_translated,
+             a.lang,
+             COALESCE(CAST(strftime('%s', a.published_at) AS INTEGER), 0) AS published_at,
+             COALESCE(a.score, 0) AS score,
+             (a.seen_at IS NULL) AS is_unread,
+             (a.liked_at IS NOT NULL) AS is_liked,
+             (a.bookmarked_at IS NOT NULL) AS is_bookmarked
+      FROM active_articles a JOIN feeds f ON f.id = a.feed_id WHERE a.feed_id = ?
     `).all(id) as MeiliArticleDoc[]
     syncArticlesByFeedToSearch(docs)
   }
@@ -168,16 +170,18 @@ export function bulkMoveFeedsToCategory(feedIds: number[], categoryId: number | 
 
   // Sync Meilisearch index for all affected feeds in one batch
   const allDocs = getDb().prepare(`
-    SELECT id, feed_id, category_id, title,
-           COALESCE(full_text, '') AS full_text,
-           COALESCE(full_text_translated, '') AS full_text_translated,
-           lang,
-           COALESCE(CAST(strftime('%s', published_at) AS INTEGER), 0) AS published_at,
-           COALESCE(score, 0) AS score,
-           (seen_at IS NULL) AS is_unread,
-           (liked_at IS NOT NULL) AS is_liked,
-           (bookmarked_at IS NOT NULL) AS is_bookmarked
-    FROM active_articles WHERE feed_id IN (${placeholders})
+    SELECT a.id, a.feed_id, a.category_id, a.title,
+           a.summary,
+           f.type AS feed_type,
+           COALESCE(a.full_text, '') AS full_text,
+           COALESCE(a.full_text_translated, '') AS full_text_translated,
+           a.lang,
+           COALESCE(CAST(strftime('%s', a.published_at) AS INTEGER), 0) AS published_at,
+           COALESCE(a.score, 0) AS score,
+           (a.seen_at IS NULL) AS is_unread,
+           (a.liked_at IS NOT NULL) AS is_liked,
+           (a.bookmarked_at IS NOT NULL) AS is_bookmarked
+    FROM active_articles a JOIN feeds f ON f.id = a.feed_id WHERE a.feed_id IN (${placeholders})
   `).all(...feedIds) as MeiliArticleDoc[]
   syncArticlesByFeedToSearch(allDocs)
 }

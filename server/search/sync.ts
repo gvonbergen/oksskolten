@@ -33,6 +33,8 @@ interface RebuildRecord {
   ok: boolean | null
   error: string | null
   documents: number | null
+  processedDocuments: number
+  totalDocuments: number | null
 }
 
 let lastRebuild: RebuildRecord | null = null
@@ -132,7 +134,15 @@ export async function rebuildSearchIndex(): Promise<void> {
   const config = getEmbeddingConfig()
   const settings = resolveIndexSettings(config)
   const embedderPlanned = !!buildEmbeddersSettings(config)
-  lastRebuild = { startedAt: Date.now(), finishedAt: null, ok: null, error: null, documents: null }
+  lastRebuild = {
+    startedAt: Date.now(),
+    finishedAt: null,
+    ok: null,
+    error: null,
+    documents: null,
+    processedDocuments: 0,
+    totalDocuments: null,
+  }
 
   try {
     const client = getSearchClient()
@@ -154,17 +164,19 @@ export async function rebuildSearchIndex(): Promise<void> {
 
     // 3. Fetch all articles from SQLite and batch-insert into staging
     const rows = getDb().prepare(`
-      SELECT id, feed_id, category_id, title,
-             summary,
-             COALESCE(full_text, '') AS full_text,
-             COALESCE(full_text_translated, '') AS full_text_translated,
-             lang,
-             COALESCE(CAST(strftime('%s', published_at) AS INTEGER), 0) AS published_at,
-             COALESCE(score, 0) AS score,
-             (seen_at IS NULL) AS is_unread,
-             (liked_at IS NOT NULL) AS is_liked,
-             (bookmarked_at IS NOT NULL) AS is_bookmarked
-      FROM active_articles
+      SELECT a.id, a.feed_id, a.category_id, a.title,
+             a.summary,
+             f.type AS feed_type,
+             COALESCE(a.full_text, '') AS full_text,
+             COALESCE(a.full_text_translated, '') AS full_text_translated,
+             a.lang,
+             COALESCE(CAST(strftime('%s', a.published_at) AS INTEGER), 0) AS published_at,
+             COALESCE(a.score, 0) AS score,
+             (a.seen_at IS NULL) AS is_unread,
+             (a.liked_at IS NOT NULL) AS is_liked,
+             (a.bookmarked_at IS NOT NULL) AS is_bookmarked
+      FROM active_articles a
+      JOIN feeds f ON f.id = a.feed_id
     `).all() as MeiliArticleDoc[]
 
     // SQLite returns 0/1 for boolean expressions; Meilisearch needs true/false
@@ -174,6 +186,7 @@ export async function rebuildSearchIndex(): Promise<void> {
       is_liked: Boolean(row.is_liked),
       is_bookmarked: Boolean(row.is_bookmarked),
     }, config))
+    lastRebuild = { ...lastRebuild!, totalDocuments: docs.length }
 
     for (let i = 0; i < docs.length; i += BATCH_SIZE) {
       const batch = docs.slice(i, i + BATCH_SIZE)
@@ -187,6 +200,7 @@ export async function rebuildSearchIndex(): Promise<void> {
         const message = task.error?.message || `document batch task ${task.uid} failed`
         throw new Error(`Meilisearch document indexing failed: ${message}`)
       }
+      lastRebuild = { ...lastRebuild!, processedDocuments: Math.min(i + batch.length, docs.length) }
     }
 
     // 4. Promote staging to production
@@ -221,7 +235,15 @@ export async function rebuildSearchIndex(): Promise<void> {
 
     searchReady = true
     liveEmbedderVerified = embedderPlanned
-    lastRebuild = { ...lastRebuild!, finishedAt: Date.now(), ok: true, error: null, documents: docs.length }
+    lastRebuild = {
+      ...lastRebuild!,
+      finishedAt: Date.now(),
+      ok: true,
+      error: null,
+      documents: docs.length,
+      processedDocuments: docs.length,
+      totalDocuments: docs.length,
+    }
     statsCache = null
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1)
     log.info(`Index rebuild complete: ${docs.length} articles in ${elapsed}s${embedderPlanned ? ' (embeddings enabled)' : ''}`)
@@ -229,7 +251,15 @@ export async function rebuildSearchIndex(): Promise<void> {
     // On failure: keep searchReady as-is (true if previously built, false if first time)
     const message = err instanceof Error ? err.message : String(err)
     log.error('Index rebuild failed:', err)
-    lastRebuild = { startedAt: lastRebuild?.startedAt ?? Date.now(), finishedAt: Date.now(), ok: false, error: message, documents: lastRebuild?.documents ?? null }
+    lastRebuild = {
+      startedAt: lastRebuild?.startedAt ?? Date.now(),
+      finishedAt: Date.now(),
+      ok: false,
+      error: message,
+      documents: lastRebuild?.documents ?? null,
+      processedDocuments: lastRebuild?.processedDocuments ?? 0,
+      totalDocuments: lastRebuild?.totalDocuments ?? null,
+    }
   } finally {
     changeLog = null
     rebuilding = false
@@ -238,30 +268,57 @@ export async function rebuildSearchIndex(): Promise<void> {
 
 /**
  * Idempotent startup hook for search. Inspects the Meilisearch state and
- * only triggers a full `rebuildSearchIndex()` if the articles index is
- * missing or empty. When the index is already populated — the common case
- * after a tsx-watch HMR restart or a normal prod redeploy — flip
- * searchReady on and return immediately.
+ * triggers a full `rebuildSearchIndex()` if the articles index is missing or
+ * empty. For a populated index, it reapplies settings and checks database
+ * document/vector coverage before deciding whether a repair rebuild is needed.
  *
  * This avoids the race that happens when each restart fires a fresh
  * rebuild while the previous process's index-management tasks are still
  * in the Meilisearch queue (the symptom is "Index `articles_staging`
- * already exists" failures and waitTask timeouts piling up).
+ * already exists" failures and waitTask timeouts piling up). A needed repair
+ * is still guarded by the same rebuild flag.
  *
  * The 6-hour cron continues to call `rebuildSearchIndex()` directly so a
  * full refresh still happens periodically.
  */
+function getExpectedSearchCoverage(): { documents: number; embeddedDocuments: number } | null {
+  try {
+    const row = getDb().prepare(`
+      SELECT
+        COUNT(*) AS documents,
+        COUNT(CASE WHEN a.summary IS NOT NULL AND trim(a.summary) != '' AND f.type != 'clip' THEN 1 END) AS embeddedDocuments
+      FROM active_articles a
+      JOIN feeds f ON f.id = a.feed_id
+    `).get() as { documents: number; embeddedDocuments: number }
+    return row
+  } catch (err) {
+    log.warn('Failed to inspect database search coverage:', err)
+    return null
+  }
+}
+
+function hasIncompleteSearchCoverage(
+  stats: { numberOfDocuments: number; numberOfEmbeddedDocuments?: number; numberOfEmbeddings?: number },
+  expected: { documents: number; embeddedDocuments: number },
+): boolean {
+  const embeddedDocuments = stats.numberOfEmbeddedDocuments ?? 0
+  const embeddings = stats.numberOfEmbeddings ?? embeddedDocuments
+  return stats.numberOfDocuments !== expected.documents || embeddedDocuments !== expected.embeddedDocuments || embeddings !== expected.embeddedDocuments
+}
+
 export async function ensureSearchIndex(): Promise<void> {
   // Step 1: existence and population check. Failures here usually mean
   // Meilisearch is unreachable, so we want to fall through to the rebuild
   // path so the startup retry loop can confirm whether Meili is back.
   let populatedDocCount = 0
+  let populatedStats: { numberOfDocuments: number; numberOfEmbeddedDocuments?: number; numberOfEmbeddings?: number } | null = null
   try {
     const client = getSearchClient()
     const { results: existingIndexes } = await client.getIndexes()
     const articles = existingIndexes.find((idx: { uid: string }) => idx.uid === ARTICLES_INDEX)
     if (articles) {
       const stats = await client.index(ARTICLES_INDEX).getStats()
+      populatedStats = stats
       if (stats.numberOfDocuments > 0) {
         populatedDocCount = stats.numberOfDocuments
       }
@@ -285,8 +342,23 @@ export async function ensureSearchIndex(): Promise<void> {
     // to the startup retry loop instead so it backs off cleanly.
     const client = getSearchClient()
     await client.index(ARTICLES_INDEX).updateSettings(resolveIndexSettings()).waitTask({ timeout: MEILI_TASK_TIMEOUT_MS })
-    await verifyLiveEmbedder()
+    const liveEmbedderMatches = await verifyLiveEmbedder()
     searchReady = true
+
+    const config = getEmbeddingConfig()
+    const expectedCoverage = getExpectedSearchCoverage()
+    const needsEmbeddingRepair = !!buildEmbeddersSettings(config) && (
+      !liveEmbedderMatches ||
+      !expectedCoverage ||
+      !populatedStats ||
+      hasIncompleteSearchCoverage(populatedStats, expectedCoverage)
+    )
+    if (needsEmbeddingRepair) {
+      liveEmbedderVerified = false
+      requestSearchRebuild()
+      log.warn('Search index embedding coverage is incomplete; scheduled a repair rebuild')
+    }
+
     log.info(`Search index already populated (${populatedDocCount} docs); skipping startup rebuild`)
     return
   }
@@ -308,7 +380,7 @@ export async function ensureSearchIndex(): Promise<void> {
  * swapped by another tool, or a previous rebuild that never completed —
  * marks semantic search unavailable while keyword search keeps working.
  */
-async function verifyLiveEmbedder(): Promise<void> {
+async function verifyLiveEmbedder(): Promise<boolean> {
   try {
     const client = getSearchClient()
     const settings = await client.index(ARTICLES_INDEX).getSettings()
@@ -317,9 +389,11 @@ async function verifyLiveEmbedder(): Promise<void> {
       getEmbeddingConfig(),
     )
     statsCache = null
+    return liveEmbedderVerified
   } catch (err) {
     log.warn('Failed to verify embedder settings on the live index:', err)
     liveEmbedderVerified = false
+    return false
   }
 }
 
@@ -339,7 +413,7 @@ export function isRebuilding(): boolean {
 export interface SearchIndexRuntime {
   semanticReady: boolean
   rebuilding: boolean
-  lastRebuild: { startedAt: number; finishedAt: number | null; ok: boolean | null; error: string | null; documents: number | null } | null
+  lastRebuild: { startedAt: number; finishedAt: number | null; ok: boolean | null; error: string | null; documents: number | null; processedDocuments: number; totalDocuments: number | null } | null
   index: { documents: number | null; embeddedDocuments: number | null; embeddings: number | null } | null
 }
 
@@ -381,15 +455,16 @@ export async function getSearchIndexRuntime(): Promise<SearchIndexRuntime> {
 // --- Fire-and-forget sync helpers ---
 
 export function syncArticleToSearch(doc: MeiliArticleDoc): void {
+  const embeddingDoc = applyEmbeddingVectors(doc)
   try {
     const client = getSearchClient()
     const index = client.index(ARTICLES_INDEX)
-    index.addDocuments([doc]).catch((err) => {
+    index.addDocuments([embeddingDoc]).catch((err) => {
       log.error('Failed to sync article:', err)
     })
 
     if (changeLog) {
-      changeLog.push({ action: 'upsert', id: doc.id, doc })
+      changeLog.push({ action: 'upsert', id: embeddingDoc.id, doc: embeddingDoc })
     }
   } catch (err) {
     log.error('Failed to sync article:', err)
@@ -488,15 +563,16 @@ export async function syncAllScoredArticlesToSearch(): Promise<number> {
 
 export function syncArticlesByFeedToSearch(docs: MeiliArticleDoc[]): void {
   if (docs.length === 0) return
+  const embeddingDocs = docs.map((doc) => applyEmbeddingVectors(doc))
   try {
     const client = getSearchClient()
     const index = client.index(ARTICLES_INDEX)
-    index.addDocuments(docs).catch((err) => {
+    index.addDocuments(embeddingDocs).catch((err) => {
       log.error('Failed to batch sync articles:', err)
     })
 
     if (changeLog) {
-      for (const doc of docs) {
+      for (const doc of embeddingDocs) {
         changeLog.push({ action: 'upsert', id: doc.id, doc })
       }
     }

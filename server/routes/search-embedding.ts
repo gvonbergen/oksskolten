@@ -124,6 +124,23 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
 
       const nextModel =
         body.model ?? (body.provider && !current.model ? EMBEDDING_DEFAULT_MODELS[body.provider] : current.model)
+      const nextDimensions = body.dimensions === undefined
+        ? current.dimensions
+        : body.dimensions === ''
+          ? null
+          : body.dimensions
+      const nextBaseUrl = body.base_url === undefined ? current.baseUrl : body.base_url.trim() || null
+      const enabledChanged = body.enabled !== undefined && body.enabled !== (current.enabled ? 'on' : 'off')
+      const providerChanged = body.provider !== undefined && body.provider !== current.provider
+      const dimensionsChanged = nextDimensions !== current.dimensions
+      const baseUrlChanged = nextBaseUrl !== current.baseUrl
+      const modelWasChanged = modelChanged(body, current)
+      const configChanged = enabledChanged || providerChanged || modelWasChanged || dimensionsChanged || baseUrlChanged
+
+      if (isRebuilding() && configChanged) {
+        reply.status(409).send({ error: 'An index rebuild is already in progress; retry this configuration change when it finishes' })
+        return
+      }
 
       // Enabling is opt-in and guarded: embeddings can only be activated
       // when automatic summarization is configured and enabled, the
@@ -149,27 +166,27 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
       }
 
       const embedderRelevant: string[] = []
-      if (body.enabled !== undefined && body.enabled !== (current.enabled ? 'on' : 'off')) {
-        upsertSetting(EMBEDDING_SETTING_ENABLED, body.enabled)
+      if (enabledChanged) {
+        upsertSetting(EMBEDDING_SETTING_ENABLED, body.enabled!)
         embedderRelevant.push('enabled')
       }
-      if (body.provider !== undefined && body.provider !== current.provider) {
-        upsertSetting(EMBEDDING_SETTING_PROVIDER, body.provider)
+      if (providerChanged) {
+        upsertSetting(EMBEDDING_SETTING_PROVIDER, body.provider!)
         embedderRelevant.push('provider')
       }
-      if (modelChanged(body, current)) {
+      if (modelWasChanged) {
         if (nextModel) upsertSetting(EMBEDDING_SETTING_MODEL, nextModel)
         else deleteSetting(EMBEDDING_SETTING_MODEL)
         embedderRelevant.push('model')
       }
-      if (body.dimensions !== undefined) {
-        if (body.dimensions === '') deleteSetting(EMBEDDING_SETTING_DIMENSIONS)
-        else upsertSetting(EMBEDDING_SETTING_DIMENSIONS, String(body.dimensions))
+      if (dimensionsChanged) {
+        if (nextDimensions === null) deleteSetting(EMBEDDING_SETTING_DIMENSIONS)
+        else upsertSetting(EMBEDDING_SETTING_DIMENSIONS, String(nextDimensions))
         embedderRelevant.push('dimensions')
       }
-      if (body.base_url !== undefined) {
-        if (body.base_url === '') deleteSetting(EMBEDDING_SETTING_BASE_URL)
-        else upsertSetting(EMBEDDING_SETTING_BASE_URL, body.base_url.trim())
+      if (baseUrlChanged) {
+        if (nextBaseUrl === null) deleteSetting(EMBEDDING_SETTING_BASE_URL)
+        else upsertSetting(EMBEDDING_SETTING_BASE_URL, nextBaseUrl)
         embedderRelevant.push('base_url')
       }
 
@@ -209,13 +226,17 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
         return
       }
       const key = (body.apiKey ?? '').trim()
-      const wasConfigured = !!getSetting(EMBEDDING_SETTING_API_KEY)
+      const previousKey = getSetting(EMBEDDING_SETTING_API_KEY) || ''
+      if (isRebuilding() && key !== previousKey) {
+        reply.status(409).send({ error: 'An index rebuild is already in progress; retry this credential change when it finishes' })
+        return
+      }
       if (key === '') {
         deleteSetting(EMBEDDING_SETTING_API_KEY)
       } else {
         upsertSetting(EMBEDDING_SETTING_API_KEY, key)
       }
-      if (getEmbeddingConfig().enabled && wasConfigured !== (key !== '')) {
+      if (getEmbeddingConfig().enabled && key !== previousKey) {
         // Keep the persisted Meilisearch embedder in sync with the managed
         // configuration (secrets change the embedder settings object).
         requestSearchRebuild()

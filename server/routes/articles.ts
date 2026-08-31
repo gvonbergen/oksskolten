@@ -346,13 +346,15 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
         })()
         // Sync clip move to Meilisearch (best-effort, outside transaction)
         const movedDoc = getDb().prepare(`
-          SELECT id, feed_id, category_id, title,
-                 COALESCE(full_text, '') AS full_text,
-                 COALESCE(full_text_translated, '') AS full_text_translated,
-                 lang,
-                 COALESCE(CAST(strftime('%s', published_at) AS INTEGER), 0) AS published_at,
-                 COALESCE(score, 0) AS score
-          FROM active_articles WHERE id = ?
+          SELECT a.id, a.feed_id, a.category_id, a.title,
+                 a.summary,
+                 f.type AS feed_type,
+                 COALESCE(a.full_text, '') AS full_text,
+                 COALESCE(a.full_text_translated, '') AS full_text_translated,
+                 a.lang,
+                 COALESCE(CAST(strftime('%s', a.published_at) AS INTEGER), 0) AS published_at,
+                 COALESCE(a.score, 0) AS score
+          FROM active_articles a JOIN feeds f ON f.id = a.feed_id WHERE a.id = ?
         `).get(existing.id) as MeiliArticleDoc | undefined
         if (movedDoc) syncArticleToSearch(movedDoc)
         reply.status(200).send({ article: moved, moved: true })

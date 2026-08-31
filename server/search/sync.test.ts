@@ -32,7 +32,7 @@ vi.mock('./client.js', () => ({
   ARTICLES_STAGING_INDEX: 'articles_staging',
 }))
 
-import { ensureSearchIndex, isSearchReady, isSemanticReady, syncAllScoredArticlesToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, rebuildSearchIndex, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
+import { ensureSearchIndex, isSearchReady, isSemanticReady, syncAllScoredArticlesToSearch, syncArticlesByFeedToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, rebuildSearchIndex, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
 import { upsertSetting, deleteSetting } from '../db.js'
 
 function seedFeed(): number {
@@ -138,6 +138,39 @@ describe('syncAllScoredArticlesToSearch', () => {
 
     const docs = mockUpdateDocuments.mock.calls[0][0] as Record<string, unknown>[]
     expect(Object.keys(docs[0]).sort()).toEqual(['id', 'score'])
+  })
+})
+
+describe('article sync embedding policy', () => {
+  beforeEach(() => {
+    setupTestDb()
+    mockAddDocuments.mockClear()
+  })
+
+  it('adds the null vector marker when a bulk-synced article has no summary', () => {
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-embedding')
+    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn().mockResolvedValue(undefined) })
+
+    syncArticlesByFeedToSearch([{
+      id: 1,
+      feed_id: 1,
+      category_id: null,
+      title: 'Article',
+      summary: null,
+      full_text: 'Body',
+      full_text_translated: '',
+      lang: 'en',
+      published_at: 1,
+      score: 0,
+      is_unread: true,
+      is_liked: false,
+      is_bookmarked: false,
+    }])
+
+    expect(mockAddDocuments.mock.calls[0][0][0]._vectors).toEqual({ 'article-v1': null })
   })
 })
 
@@ -315,10 +348,14 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
 
     expect(isSearchReady()).toBe(true)
     expect(isSemanticReady()).toBe(true)
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild).toMatchObject({ processedDocuments: 2, totalDocuments: 2, documents: 2 })
   })
 
   it('startup reconciliation re-applies the embedder to an already-populated production index', async () => {
     seedEmbeddingSettings()
+    const feedId = seedFeed()
+    for (let i = 0; i < 7; i++) seedArticle(feedId, { url: `https://example.com/startup-${i}` })
     mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
     mockGetStats.mockResolvedValue({ numberOfDocuments: 7 })
     mockGetSettings.mockResolvedValue({
@@ -338,6 +375,8 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
 
   it('semantic readiness stays false when the live index lacks the expected embedder', async () => {
     seedEmbeddingSettings()
+    const feedId = seedFeed()
+    for (let i = 0; i < 7; i++) seedArticle(feedId, { url: `https://example.com/missing-${i}` })
     mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
     mockGetStats.mockResolvedValue({ numberOfDocuments: 7 })
     mockGetSettings.mockResolvedValue({ embedders: null })

@@ -155,6 +155,18 @@ describe('PATCH /api/settings/search-embedding', () => {
     expect(mockRequestRebuild).toHaveBeenCalledTimes(1)
   })
 
+  it('rejects configuration changes while a rebuild is active', async () => {
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    mockIsRebuilding.mockReturnValueOnce(true)
+
+    const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { model: 'text-embedding-3-large' }, headers: json })
+    expect(res.statusCode).toBe(409)
+    expect(getSetting('embedding.model')).toBe('text-embedding-3-small')
+    expect(mockRequestRebuild).not.toHaveBeenCalled()
+  })
+
   it('validates provider, dimensions and base_url', async () => {
     let res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'nope' }, headers: json })
     expect(res.statusCode).toBe(400)
@@ -209,6 +221,19 @@ describe('POST /api/settings/search-embedding/key', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().configured).toBe(false)
     expect(getSetting('embedding.api_key')).toBeUndefined()
+  })
+
+  it('rebuilds when an existing credential is replaced', async () => {
+    seedPrerequisite()
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-old')
+
+    const res = await app.inject({ method: 'POST', url: '/api/settings/search-embedding/key', payload: { apiKey: 'sk-new' }, headers: json })
+    expect(res.statusCode).toBe(200)
+    expect(getSetting('embedding.api_key')).toBe('sk-new')
+    expect(mockRequestRebuild).toHaveBeenCalledTimes(1)
   })
 })
 

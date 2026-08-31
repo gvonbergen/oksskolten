@@ -578,13 +578,18 @@ const dict = {
     zh: '隐私：启用后，文章标题和摘要将发送至 ${provider} 云 API 以生成嵌入。保留/地区政策取决于提供商',
   },
   'settings.semanticPrivacyLocal': {
-    ja: 'プライバシー: 記事のタイトルと要約は、設定したローカルエンドポイント（${url}）に送信されます。クラウドサービスへの転送は行われません',
-    en: 'Privacy: article titles and summaries are sent to your configured local endpoint (${url}). No cloud transfer happens',
-    zh: '隐私：文章标题和摘要将发送至您配置的本地端点（${url}）。不会传输到云端',
+    ja: 'プライバシー: 記事のタイトルと要約は、設定したエンドポイント（${url}）に送信されます。転送先のプライバシーポリシーを確認してください',
+    en: 'Privacy: article titles and summaries are sent to your configured endpoint (${url}). Check that endpoint’s privacy policy',
+    zh: '隐私：文章标题和摘要将发送至您配置的端点（${url}）。请确认该端点的隐私政策',
   },
   'settings.semanticReady': { ja: '利用可能', en: 'Ready', zh: '可用'},
   'settings.semanticNotReady': { ja: '利用不可（キーワードのみ）', en: 'Unavailable (keyword only)', zh: '不可用（仅关键词）'},
   'settings.semanticRebuilding': { ja: 'インデックスを再構築中…', en: 'Rebuilding index…', zh: '正在重建索引…'},
+  'settings.semanticRebuildProgress': {
+    ja: '処理済み: ${processed} / ${total} 記事',
+    en: 'Processed: ${processed} / ${total} articles',
+    zh: '已处理：${processed} / ${total} 篇文章',
+  },
   'settings.semanticEmbeddedProgress': {
     ja: '${embedded} / ${documents} 記事が埋め込まれました',
     en: '${embedded} / ${documents} articles embedded',

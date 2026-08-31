@@ -63,7 +63,9 @@ Stored in the SQLite `settings` table (see [ADR 001](./../adr/001-settings-dual-
   embedding generation for them (verified against the pinned v1.13 image by
   `scripts/smoke-embedding.ts`). No embedding is ever generated from a
   title-only article; once `updateArticleContent` writes a summary, the
-  re-upserted document is embedded automatically and idempotently.
+  re-upserted RSS document is embedded automatically and idempotently.
+  Manually clipped (`clip`) articles are intentionally excluded from automatic
+  summarization and embeddings in v1, including after a manual summary.
 - **Staging rebuild.** Enabling, disabling, or changing provider/model/
   dimensions/base_url triggers `requestSearchRebuild()`: the app builds a fresh
   `articles_staging` index with the managed embedder, batches in all active
@@ -78,9 +80,13 @@ Stored in the SQLite `settings` table (see [ADR 001](./../adr/001-settings-dual-
   `search_mode: "keyword-fallback"` instead of returning empty results.
 - **Readiness.** `semantic_ready` is computed from config + live-index
   verification (`verifyLiveEmbedder()` compares persisted embedder settings
-  with the expected non-secret fingerprint at startup). Index stats
+  with the expected non-secret fingerprint at startup). On populated startup,
+  database article and summary counts are compared with Meilisearch document
+  and vector counts; incomplete legacy coverage schedules one guarded repair
+  rebuild before semantic readiness is reported. Index stats
   (documents/embeddedDocuments/embeddings) are polled from Meilisearch with a
-  short TTL and surfaced in the settings UI.
+  short TTL and surfaced in the settings UI. Rebuild status includes processed
+  and total document counts.
 
 ## Providers
 
@@ -104,9 +110,11 @@ Ollama).
 
 When `summary.auto` is `on` and the summary provider/model are configured, the
 fetch pipeline (`processArticle`) fires `autoSummarizeArticle()` for each newly
-ingested article with full text, and again when a retried article first
-obtains its full text. Summaries persist via `updateArticleContent`, which also
-re-upserts the search document — making the article eligible for embedding.
+ingested RSS article with full text, and again when a retried article first
+obtains its full text. URL-clipped articles are intentionally not scheduled for
+automatic summarization. Summaries persist via `updateArticleContent`, which
+also re-upserts the search document — making an eligible RSS article eligible
+for embedding.
 Failures are logged and never block article availability (on-demand
 summarization remains available from the article UI).
 
@@ -127,7 +135,7 @@ Non-secret configuration + prerequisite + runtime status:
   "prerequisite": { "met": true, "autoSummaryEnabled": true, "summaryProvider": "openai", "summaryModel": "gpt-4.1-mini", "reason": null },
   "semantic_ready": true,
   "rebuilding": false,
-  "last_rebuild": { "startedAt": 0, "finishedAt": 0, "ok": true, "error": null, "documents": 45342 },
+  "last_rebuild": { "startedAt": 0, "finishedAt": 0, "ok": true, "error": null, "documents": 45342, "processedDocuments": 45342, "totalDocuments": 45342 },
   "index": { "documents": 45342, "embeddedDocuments": 45100, "embeddings": 45100 }
 }
 ```
@@ -141,7 +149,9 @@ Updates `enabled`, `provider`, `model`, `dimensions`, `base_url`. Enabling
 (`enabled:"on"`) is rejected with HTTP 400 unless the prerequisite is met, an
 embedding credential exists for cloud providers, and the provider/model are
 set. Embedder-relevant changes kick an asynchronous rebuild (never awaited by
-the caller). Disabling rebuilds keyword-only so no embedder is left behind.
+the caller); configuration and credential changes are rejected with HTTP 409
+while a rebuild is active. Disabling rebuilds keyword-only so no embedder is
+left behind.
 
 ### POST /api/settings/search-embedding/key
 

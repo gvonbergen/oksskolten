@@ -25,6 +25,7 @@ export interface MeiliArticleDoc {
   title: string
   /** Used by the embedder template (title + summary) — keeping keyword attributes unchanged */
   summary: string | null
+  feed_type?: 'rss' | 'clip'
   full_text: string
   full_text_translated: string
   lang: string | null
