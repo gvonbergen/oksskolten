@@ -14,7 +14,6 @@ import {
   isAutoSummaryEnabled,
   isEmbeddingPrerequisiteMet,
   applyEmbeddingVectors,
-  embeddingConfigFingerprint,
   matchesExpectedEmbedder,
   testEmbeddingConnection,
   type EmbeddingConfig,
@@ -101,14 +100,6 @@ describe('embedding config compiler', () => {
     expect(json).not.toContain('sk-super-secret')
     expect(status.config).not.toHaveProperty('apiKey')
     expect(status.config.apiKeyConfigured).toBe(true)
-  })
-
-  it('fingerprint changes only with non-secret configuration', () => {
-    const a = embeddingConfigFingerprint(openaiConfig({ apiKey: 'key-a' }))
-    const b = embeddingConfigFingerprint(openaiConfig({ apiKey: 'key-b' }))
-    expect(a).toBe(b)
-    const c = embeddingConfigFingerprint(openaiConfig({ model: 'text-embedding-3-large', dimensions: 3072 }))
-    expect(a).not.toBe(c)
   })
 
   it('matchesExpectedEmbedder compares live settings against config, stripping secrets', () => {

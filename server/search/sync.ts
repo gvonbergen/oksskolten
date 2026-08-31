@@ -264,6 +264,7 @@ export async function rebuildSearchIndex(): Promise<void> {
   }
   rebuilding = true
   liveEmbedderVerified = false
+  const priorSwapInFlight = swapPossiblyInFlight
   changeLog = pendingChangeLog ?? changeLog ?? []
   pendingChangeLog = null
   const config = getEmbeddingConfig()
@@ -453,11 +454,12 @@ export async function rebuildSearchIndex(): Promise<void> {
       searchReady = false
       liveEmbedderVerified = false
       pendingChangeLog = changeLog ? [...changeLog] : []
-    } else if (swapPossiblyInFlight && changeLog && changeLog.length > 0) {
-      // An earlier swap may still commit and promote a snapshot that omits
-      // the captured mutations; preserve them so the bounded retry
-      // reconciles. The live production index is still the known-good
-      // pre-swap one, so keyword search stays available meanwhile.
+    } else if ((swapPossiblyInFlight || priorSwapInFlight) && changeLog && changeLog.length > 0) {
+      // An earlier swap may have committed (or may still commit) and promote
+      // a snapshot that omits the captured mutations; preserve them so the
+      // bounded retry reconciles. When the earlier swap already committed
+      // FIFO, the live production index is the pre-swap known-good one only
+      // in the still-in-flight case, so keyword search stays available.
       pendingChangeLog = [...changeLog]
     }
     const rawMessage = err instanceof Error ? err.message : String(err)

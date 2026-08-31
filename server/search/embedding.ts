@@ -234,23 +234,6 @@ export function buildEmbeddersSettings(config: EmbeddingConfig): Embedders {
 }
 
 /**
- * Non-secret canonical fingerprint of the embedder configuration. Two
- * configs that embed identically must produce the same fingerprint;
- * changes to the secret must not change it.
- */
-export function embeddingConfigFingerprint(config: EmbeddingConfig): string {
-  return JSON.stringify({
-    name: EMBEDDER_NAME,
-    enabled: config.enabled,
-    provider: config.provider,
-    model: config.model,
-    dimensions: config.dimensions,
-    baseUrl: config.baseUrl,
-    template: EMBEDDING_TEMPLATE,
-  })
-}
-
-/**
  * Compare a live `embedders` object read back from the Meilisearch index
  * against what the current config expects. Secrets are stripped before
  * comparison — the live settings response may contain the persisted API

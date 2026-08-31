@@ -78,6 +78,7 @@ function isUnsafeAddress(address: string): boolean {
   }
   return [
     ['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8], ['2001:db8::', 32],
+    ['64:ff9b::', 96], ['64:ff9b:1::', 48],
   ].some(([network, bits]) => inCidr(address, network as string, bits as number))
 }
 

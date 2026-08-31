@@ -534,6 +534,44 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     expect(recovered.lastRebuild?.ok).toBe(true)
   })
 
+  it("preserves reconciliation when the retry rebuild's own swap determinately fails", async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    const articleId = seedArticle(feedId, { url: 'https://example.com/second-failure' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask, catch: vi.fn() }))
+    _setSwapRetryDelay(40)
+    // Rebuild A: swap accepted but the wait times out — indeterminate.
+    mockSwapIndexes.mockImplementationOnce(() => ({
+      waitTask: vi.fn().mockRejectedValue(new Error('MeiliSearchTaskTimeOutError: timeout')),
+    }))
+    // Rebuild B (the armed retry): its own swap task determinately FAILS
+    // after A's swap already committed FIFO — production now holds A's
+    // stale snapshot.
+    let swapCall = 0
+    mockSwapIndexes.mockImplementation(() => {
+      swapCall++
+      if (swapCall === 1) {
+        return { waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'swap rejected' } }) }
+      }
+      return { waitTask: mockWaitTask }
+    })
+
+    await rebuildSearchIndex()
+    syncArticleFiltersToSearch([{ id: articleId, is_liked: true }])
+
+    // The chain must keep going (retry C) until the change log is replayed
+    // and the index converges, instead of silently dropping everything.
+    await vi.waitFor(() => expect(mockSwapIndexes.mock.calls.length).toBeGreaterThanOrEqual(3))
+    await vi.waitFor(() => expect(isRebuilding()).toBe(false))
+    expect(isSearchReady()).toBe(true)
+    const recovered = await getSearchIndexRuntime()
+    expect(recovered.lastRebuild?.ok).toBe(true)
+    const replayed = mockUpdateDocuments.mock.calls[mockUpdateDocuments.mock.calls.length - 1][0] as Record<string, unknown>[]
+    expect(replayed).toEqual([{ id: articleId, is_liked: true }])
+    mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask }))
+  })
+
   it('a determinately failed swap task is not retried as indeterminate', async () => {
     seedEmbeddingSettings()
     const feedId = seedFeed()

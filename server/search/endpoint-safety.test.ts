@@ -31,6 +31,18 @@ describe('validateEmbeddingEndpoint', () => {
     if (!result.ok) expect(result.error).toMatch(/private|local/i)
   })
 
+  it('rejects a NAT64-translated internal target via the well-known prefix', async () => {
+    const result = await validateEmbeddingEndpoint('https://[64:ff9b::169.254.169.254]/v1')
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toMatch(/private|local/i)
+  })
+
+  it('rejects a NAT64-translated internal target via the local-use prefix', async () => {
+    const result = await validateEmbeddingEndpoint('https://[64:ff9b:1::169.254.169.254]/v1')
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toMatch(/private|local/i)
+  })
+
   it('rejects HTTP for non-local hostnames', async () => {
     const result = await validateEmbeddingEndpoint('http://8.8.8.8/v1')
     expect(result.ok).toBe(false)
