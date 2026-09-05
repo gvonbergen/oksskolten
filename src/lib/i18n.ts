@@ -556,17 +556,6 @@ const dict = {
     en: 'Must match the model\'s output dimension; leave empty to use the model default',
     zh: '需与模型的输出维度一致；留空使用模型默认值',
   },
-  'settings.semanticBaseUrl': { ja: 'API ベース URL', en: 'API base URL', zh: 'API 基础 URL'},
-  'settings.semanticBaseUrlDesc': {
-    ja: 'OpenAI は既定で https://api.openai.com/v1。互換エンドポイント（OpenRouter など）の場合のみ指定。Ollama の URL は AI プロバイダーの Ollama 設定を再利用します',
-    en: 'OpenAI defaults to https://api.openai.com/v1 — set this only for compatible gateways (e.g. OpenRouter). Ollama reuses the base URL configured in AI Providers',
-    zh: 'OpenAI 默认为 https://api.openai.com/v1 — 仅兼容网关（如 OpenRouter）需要指定。Ollama 复用 AI 提供商中配置的基础 URL',
-  },
-  'settings.semanticBaseUrlReused': {
-    ja: 'AI プロバイダーの Ollama 設定（ベース URL とカスタムヘッダー）を再利用します。変更はそちらで行ってください',
-    en: 'Reused from the Ollama provider settings in AI Providers (base URL and custom headers). Configure it there',
-    zh: '复用 AI 提供商中 Ollama 的设置（基础 URL 和自定义请求头）。请在那里修改',
-  },
   'settings.semanticApiKeyReused': {
     ja: 'AI プロバイダー（OpenAI）で設定された API キーを再利用します',
     en: 'Uses the OpenAI API key configured in AI Providers (OpenAI)',

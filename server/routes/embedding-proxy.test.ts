@@ -1,6 +1,6 @@
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { describe, it, expect, afterAll, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterAll, beforeEach, afterEach } from 'vitest'
 import Fastify, { type FastifyInstance } from 'fastify'
 import rateLimit from '@fastify/rate-limit'
 import { embeddingProxyRoutes } from './embedding-proxy.js'
@@ -8,6 +8,16 @@ import { isRateLimitExempt } from '../rate-limit.js'
 import { setupTestDb } from '../__tests__/helpers/testDb.js'
 import { upsertSetting } from '../db.js'
 import { getEmbeddingProxyToken } from '../search/proxy-config.js'
+
+// The transport stays real by default (the ollama forwarding tests run the
+// pinned request helper against a local HTTP server). The OpenAI test
+// mocks the transport per-call so the default-endpoint derivation and
+// header isolation can be probed without touching api.openai.com.
+vi.mock('../search/endpoint-safety.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../search/endpoint-safety.js')>()
+  return { ...actual, safeEmbeddingRequest: vi.fn(actual.safeEmbeddingRequest) }
+})
+import { safeEmbeddingRequest } from '../search/endpoint-safety.js'
 
 const apps: FastifyInstance[] = []
 
@@ -73,10 +83,9 @@ describe('embedding proxy endpoint forwarding', () => {
   })
 
   afterEach(async () => {
-    await Promise.all([
-      app?.close(),
-      new Promise<void>(resolve => upstream?.close(() => resolve())),
-    ])
+    // The OpenAI test mocked the transport, so upstream may not exist.
+    await app?.close()
+    if (upstream) await new Promise<void>(resolve => upstream.close(() => resolve()))
   })
 
   async function buildOllamaApp(): Promise<FastifyInstance> {
@@ -105,26 +114,23 @@ describe('embedding proxy endpoint forwarding', () => {
     return instance
   }
 
-  it('does not leak ollama.custom_headers to the OpenAI provider', async () => {
-    upstream = http.createServer((req, res) => {
-      const chunks: Buffer[] = []
-      req.on('data', c => chunks.push(c))
-      req.on('end', () => {
-        received.push({ url: req.url, body: Buffer.concat(chunks).toString('utf8'), headers: req.headers })
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ data: [{ embedding: new Array(1536).fill(0.1) }] }))
-      })
-    })
-    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
-    const port = (upstream.address() as AddressInfo).port
-
+  it('does not leak ollama.custom_headers to the OpenAI provider (default endpoint, reused credential)', async () => {
     upsertSetting('embedding.enabled', 'on')
     upsertSetting('embedding.provider', 'openai')
     upsertSetting('embedding.model', 'text-embedding-3-small')
-    upsertSetting('embedding.base_url', `http://127.0.0.1:${port}/v1`)
-    // Operator-configured Ollama headers must never reach the OpenAI endpoint.
     upsertSetting('ollama.custom_headers', JSON.stringify({ 'x-tenant': 'acme', authorization: 'Bearer sk-ollama-secret' }))
     upsertSetting('api_key.openai', 'sk-openai')
+
+    const safe = vi.mocked(safeEmbeddingRequest)
+    safe.mockClear()
+    safe.mockImplementationOnce(async (rawUrl, _body, headers) => {
+      received.push({ url: new URL(rawUrl).pathname, body: '', headers })
+      return {
+        statusCode: 200,
+        headers: { 'content-type': 'application/json' },
+        body: Buffer.from(JSON.stringify({ data: [{ embedding: new Array(1536).fill(0.1) }] })),
+      }
+    })
 
     app = Fastify()
     await app.register(embeddingProxyRoutes)
@@ -135,9 +141,12 @@ describe('embedding proxy endpoint forwarding', () => {
       payload: { model: 'text-embedding-3-small', input: ['hello'] },
     })
     expect(res.statusCode).toBe(200)
-    expect(received).toHaveLength(1)
+    // Semantic Search no longer has a base-URL setting: the OpenAI proxy
+    // target is the default endpoint.
+    const [url] = safe.mock.calls[0]
+    expect(url).toBe('https://api.openai.com/v1/embeddings')
+    // The openai credential is the auth header, never the ollama LLM header.
     expect(received[0].headers['x-tenant']).toBeUndefined()
-    // The openai credential is the auth header, not the ollama LLM header.
     expect(received[0].headers['authorization']).toBe('Bearer sk-openai')
   })
 

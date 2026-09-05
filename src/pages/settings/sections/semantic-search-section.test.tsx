@@ -45,17 +45,47 @@ function baseStatus(overrides: Record<string, unknown> = {}) {
   }
 }
 
-describe('SemanticSearchSection — provider connection settings reuse', () => {
-  it('shows the reused Ollama base URL as read-only and points at the AI Providers section', () => {
+describe('SemanticSearchSection — no base-URL configuration', () => {
+  it('renders no base-URL field, label, input or helper text for Ollama', () => {
     swrData['/api/settings/search-embedding'] = baseStatus({ base_url: 'http://10.8.0.1:11434' })
     render(<SemanticSearchSection t={t} settings={{} as never} />)
 
-    // The reused value is displayed...
-    expect(screen.getByText('http://10.8.0.1:11434')).toBeTruthy()
-    // ...with a pointer to the LLM provider section instead of an editable field.
-    expect(screen.getByText('settings.semanticBaseUrlReused')).toBeTruthy()
-    // No editable input carries the base URL value.
+    // The base-URL field, its label, its descriptions and the reused-value
+    // helper text must be gone entirely for every provider.
+    expect(screen.queryByText('settings.semanticBaseUrl')).toBeNull()
+    expect(screen.queryByText('settings.semanticBaseUrlDesc')).toBeNull()
+    expect(screen.queryByText('settings.semanticBaseUrlReused')).toBeNull()
+    // No input (editable or disabled) carries the reused Ollama address.
     expect(screen.queryByDisplayValue('http://10.8.0.1:11434')).toBeNull()
+    expect(screen.queryByPlaceholderText('https://api.openai.com/v1')).toBeNull()
+  })
+
+  it('renders no base-URL field for OpenAI even when a stale base_url exists in status', () => {
+    swrData['/api/settings/search-embedding'] = baseStatus({
+      provider: 'openai',
+      model: 'text-embedding-3-small',
+      base_url: 'https://openrouter.ai/api/v1',
+      api_key_configured: true,
+    })
+    render(<SemanticSearchSection t={t} settings={{} as never} />)
+
+    expect(screen.queryByText('settings.semanticBaseUrl')).toBeNull()
+    expect(screen.queryByText('settings.semanticBaseUrlDesc')).toBeNull()
+    expect(screen.queryByDisplayValue('https://openrouter.ai/api/v1')).toBeNull()
+  })
+
+  it('never sends a base_url in the save body, including after a provider switch', () => {
+    swrData['/api/settings/search-embedding'] = baseStatus({ base_url: 'http://10.8.0.1:11434' })
+    render(<SemanticSearchSection t={t} settings={{} as never} />)
+
+    fireEvent.click(screen.getByText('settings.semanticProviderOpenai'))
+    fireEvent.click(screen.getByText('settings.semanticSave'))
+
+    expect(apiPatch).toHaveBeenCalledWith('/api/settings/search-embedding', expect.objectContaining({
+      provider: 'openai',
+      model: 'text-embedding-3-small',
+    }))
+    expect(JSON.stringify(vi.mocked(apiPatch).mock.calls[0][1])).not.toContain('base_url')
   })
 
   it('does not render a second API key input for OpenAI — the reused credential is reported instead', () => {
@@ -83,18 +113,6 @@ describe('SemanticSearchSection — provider connection settings reuse', () => {
     expect(screen.queryByPlaceholderText('sk-...')).toBeNull()
   })
 
-  it('keeps the OpenAI gateway override editable (no LLM-side base URL exists to reuse)', () => {
-    swrData['/api/settings/search-embedding'] = baseStatus({
-      provider: 'openai',
-      model: 'text-embedding-3-small',
-      base_url: 'https://openrouter.ai/api/v1',
-      api_key_configured: true,
-    })
-    render(<SemanticSearchSection t={t} settings={{} as never} />)
-
-    expect(screen.getByDisplayValue('https://openrouter.ai/api/v1')).toBeTruthy()
-  })
-
   it('keeps the provider-specific privacy warnings', () => {
     swrData['/api/settings/search-embedding'] = baseStatus({ base_url: 'http://10.8.0.1:11434' })
     const { unmount } = render(<SemanticSearchSection t={t} settings={{} as never} />)
@@ -106,86 +124,28 @@ describe('SemanticSearchSection — provider connection settings reuse', () => {
     expect(screen.getByText('settings.semanticPrivacyCloud')).toBeTruthy()
   })
 
-  it('does not carry the reused Ollama base URL into the OpenAI gateway override when saving after a provider switch', () => {
+  it('keeps unsaved model edits when clicking the already-active provider tab', () => {
     swrData['/api/settings/search-embedding'] = baseStatus({
       provider: 'ollama',
+      model: 'nomic-embed-text',
       base_url: 'http://10.8.0.1:11434',
     })
     render(<SemanticSearchSection t={t} settings={{} as never} />)
 
-    // Switch the provider to openai without editing the override field.
-    fireEvent.click(screen.getByText('settings.semanticProviderOpenai'))
-    // hasChanges now true (provider differs) → save button appears.
+    // Type an unsaved model edit.
+    const modelField = screen.getByDisplayValue('nomic-embed-text')
+    fireEvent.change(modelField, { target: { value: 'another-model' } })
+    expect(screen.getByDisplayValue('another-model')).toBeTruthy()
+
+    // Clicking the already-active 'ollama' tab must not discard the edit.
+    fireEvent.click(screen.getByText('settings.semanticProviderOllama'))
     fireEvent.click(screen.getByText('settings.semanticSave'))
 
     expect(apiPatch).toHaveBeenCalledWith('/api/settings/search-embedding', expect.objectContaining({
-      provider: 'openai',
-      model: 'text-embedding-3-small',
-      base_url: '',
+      provider: 'ollama',
+      model: 'another-model',
     }))
-    // The stored Ollama address is never sent to the OpenAI embedder.
-    expect(JSON.stringify(vi.mocked(apiPatch).mock.calls[0][1])).not.toContain('10.8.0.1')
-  })
-
-  it('restores the persisted OpenAI override when switching back to openai', () => {
-    swrData['/api/settings/search-embedding'] = baseStatus({
-      provider: 'openai',
-      model: 'text-embedding-3-small',
-      base_url: 'https://openrouter.ai/api/v1',
-      api_key_configured: true,
-    })
-    render(<SemanticSearchSection t={t} settings={{} as never} />)
-
-    expect(screen.getByDisplayValue('https://openrouter.ai/api/v1')).toBeTruthy()
-    // Away to ollama, then back to openai — the openai override is restored,
-    // not clobbered by a blank.
-    fireEvent.click(screen.getByText('settings.semanticProviderOllama'))
-    expect(screen.queryByDisplayValue('https://openrouter.ai/api/v1')).toBeNull()
-    fireEvent.click(screen.getByText('settings.semanticProviderOpenai'))
-    expect(screen.getByDisplayValue('https://openrouter.ai/api/v1')).toBeTruthy()
-  })
-
-  it('keeps unsaved edited override when clicking the already-active provider tab', () => {
-    swrData['/api/settings/search-embedding'] = baseStatus({
-      provider: 'openai',
-      model: 'text-embedding-3-small',
-      base_url: 'https://openrouter.ai/api/v1',
-      api_key_configured: true,
-    })
-    render(<SemanticSearchSection t={t} settings={{} as never} />)
-
-    // Type an unsaved gateway override.
-    const field = screen.getByDisplayValue('https://openrouter.ai/api/v1')
-    fireEvent.change(field, { target: { value: 'https://gateway.example/v1' } })
-    expect(screen.getByDisplayValue('https://gateway.example/v1')).toBeTruthy()
-
-    // Clicking the already-active 'openai' tab must not discard the edit.
-    fireEvent.click(screen.getByText('settings.semanticProviderOpenai'))
-    fireEvent.click(screen.getByText('settings.semanticSave'))
-
-    expect(apiPatch).toHaveBeenCalledWith('/api/settings/search-embedding', expect.objectContaining({
-      provider: 'openai',
-      base_url: 'https://gateway.example/v1',
-    }))
-  })
-
-  it('switching providers resets the override so typed edits never cross providers', () => {
-    swrData['/api/settings/search-embedding'] = baseStatus({
-      provider: 'openai',
-      model: 'text-embedding-3-small',
-      base_url: 'https://openrouter.ai/api/v1',
-      api_key_configured: true,
-    })
-    render(<SemanticSearchSection t={t} settings={{} as never} />)
-
-    const field = screen.getByDisplayValue('https://openrouter.ai/api/v1')
-    fireEvent.change(field, { target: { value: 'http://10.8.0.1:11434' } })
-
-    // Switch to ollama (unsaved cross-provider value is cleared, not kept)
-    // then switch back to openai: the persisted override is restored, not the
-    // typed ollama address.
-    fireEvent.click(screen.getByText('settings.semanticProviderOllama'))
-    fireEvent.click(screen.getByText('settings.semanticProviderOpenai'))
-    expect(screen.getByDisplayValue('https://openrouter.ai/api/v1')).toBeTruthy()
+    // No base URL is ever part of the payload.
+    expect(JSON.stringify(vi.mocked(apiPatch).mock.calls[0][1])).not.toContain('base_url')
   })
 })

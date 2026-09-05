@@ -55,13 +55,6 @@ export const EMBEDDING_SETTING_PROVIDER = 'embedding.provider'
 export const EMBEDDING_SETTING_MODEL = 'embedding.model'
 export const EMBEDDING_SETTING_DIMENSIONS = 'embedding.dimensions'
 /**
- * OpenAI-only optional override for OpenAI-compatible gateways (e.g.
- * OpenRouter). The Ollama provider does not use this key: its endpoint is
- * reused from the LLM provider settings (`ollama.base_url`), the single
- * source of truth for that provider's connection.
- */
-export const EMBEDDING_SETTING_BASE_URL = 'embedding.base_url'
-/**
  * Legacy per-embedding credential (PR 1). Embeddings now reuse
  * `api_key.openai` from the LLM provider section; a stored value here is
  * only honored as a fallback when no OpenAI provider key exists.
@@ -75,6 +68,11 @@ export interface EmbeddingConfig {
   provider: EmbeddingProvider | null
   model: string | null
   dimensions: number | null
+  /**
+   * Effective endpoint base, derived server-side — never user-editable in
+   * Semantic Search. `ollama`: reused `ollama.base_url` from AI Providers.
+   * `openai`: always null (default OpenAI endpoint).
+   */
   baseUrl: string | null
   /** Secret. Never serialize this outside the server process. */
   apiKey: string | null
@@ -89,7 +87,8 @@ export interface EmbeddingConfig {
  *   chain as the Ollama LLM provider) plus `ollama.custom_headers`.
  * - `openai` reuses `api_key.openai`; a legacy `embedding.api_key` is
  *   honored only as a fallback. There is no LLM-side OpenAI base URL, so
- *   `embedding.base_url` remains the optional gateway override.
+ *   OpenAI embeddings always use the default `https://api.openai.com/v1`
+ *   endpoint — Semantic Search no longer carries a base-URL setting.
  */
 export interface EmbeddingConnection {
   baseUrl: string | null
@@ -109,7 +108,7 @@ export function resolveEmbeddingConnection(
     }
   }
   return {
-    baseUrl: readSetting(EMBEDDING_SETTING_BASE_URL) || null,
+    baseUrl: null,
     apiKey: readSetting('api_key.openai') || readSetting(EMBEDDING_SETTING_API_KEY) || null,
     customHeaders: {},
   }
@@ -269,17 +268,26 @@ export function buildEmbeddersSettings(config: EmbeddingConfig): Embedders {
   }
 
   if (config.provider === 'openai') {
+    // No base URL is configured anywhere for OpenAI embeddings: the
+    // endpoint is Meilisearch's default OpenAI endpoint and the credential
+    // is the reused `api_key.openai` / legacy `embedding.api_key`. The
+    // connection settings live in AI Providers, not in Semantic Search.
     return {
       [EMBEDDER_NAME]: {
         source: 'openAi',
         model: config.model,
-        ...(config.baseUrl ? { url: getEmbeddingProxyUrl() } : {}),
         ...(config.apiKey ? { apiKey: config.apiKey } : {}),
         ...shared,
       },
     }
   }
-  return { [EMBEDDER_NAME]: { source: 'ollama', model: config.model, url: getEmbeddingProxyUrl(), ...shared } }
+  // Ollama requests go through the internal tokenized proxy (SSRF-safe
+  // forwarding + `ollama.custom_headers` injection). Meilisearch validates
+  // that an `ollama` embedder URL ends with `/api/embed` or
+  // `/api/embeddings`, so the proxy endpoint (`/<token>/api/embed`, which
+  // the proxy route forwards) is appended to the tokenized base URL.
+  const ollamaProxyUrl = `${getEmbeddingProxyUrl()}/api/embed`
+  return { [EMBEDDER_NAME]: { source: 'ollama', model: config.model, url: ollamaProxyUrl, ...shared } }
 }
 
 /**
@@ -386,6 +394,10 @@ export async function testEmbeddingConnection(config: EmbeddingConfig): Promise<
   try {
     let url: string
     if (config.provider === 'openai') {
+      // A base URL can no longer be configured in Semantic Search; the
+      // `config.baseUrl ||` fallback keeps the function generic for direct
+      // callers (tests) pointing at a local endpoint. Production config
+      // always yields the default OpenAI endpoint.
       const base = (config.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '')
       url = `${base}/embeddings`
       if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`

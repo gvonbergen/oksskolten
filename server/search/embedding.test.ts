@@ -49,12 +49,14 @@ describe('embedding config compiler', () => {
     expect(settings).toBeNull()
   })
 
-  it('compiles the openai embedder with model, dimensions, url and template', () => {
+  it('compiles the openai embedder with model, dimensions, credential and template (default endpoint)', () => {
     upsertSetting('embedding.enabled', 'on')
     upsertSetting('embedding.provider', 'openai')
     upsertSetting('embedding.model', 'text-embedding-3-small')
     upsertSetting('embedding.dimensions', '1536')
     upsertSetting('embedding.api_key', 'sk-abc')
+    // A stale legacy base URL must not resurrect the removed Semantic
+    // Search base-URL setting — OpenAI embeddings use the default endpoint.
     upsertSetting('embedding.base_url', 'https://openrouter.ai/api/v1')
 
     const embedders = buildEmbeddersSettings(getEmbeddingConfig())
@@ -63,14 +65,14 @@ describe('embedding config compiler', () => {
     expect(embedder.source).toBe('openAi')
     expect(embedder.model).toBe('text-embedding-3-small')
     expect(embedder.dimensions).toBe(1536)
-    expect(embedder.url).toBeDefined()
+    expect(embedder.url).toBeUndefined()
     expect(embedder.documentTemplate).toBe(EMBEDDING_TEMPLATE)
     expect(embedder.apiKey).toBe('sk-abc')
     // Only the managed embedder is emitted
     expect(Object.keys(embedders!)).toEqual([EMBEDDER_NAME])
   })
 
-  it('compiles the ollama embedder through the safe proxy with the model', () => {
+  it('compiles the ollama embedder through the tokenized proxy URL ending in /api/embed', () => {
     upsertSetting('embedding.enabled', 'on')
     upsertSetting('embedding.provider', 'ollama')
     upsertSetting('embedding.model', 'nomic-embed-text')
@@ -79,7 +81,12 @@ describe('embedding config compiler', () => {
     const embedder = embedders![EMBEDDER_NAME] as Record<string, unknown>
     expect(embedder.source).toBe('ollama')
     expect(embedder.model).toBe('nomic-embed-text')
-    expect(embedder.url).toBeDefined()
+    const url = embedder.url as string
+    // Meilisearch (v1.13+) rejects ollama embedder URLs that do not end
+    // with /api/embed or /api/embeddings (the live-Docker failure being
+    // fixed here); the operational proxy path is /<token>/api/embed.
+    expect(url).toMatch(/\/api\/embed$/)
+    expect(url).toContain('/api/internal/embedding-proxy/')
     expect(embedder.apiKey).toBeUndefined()
     expect(embedder.documentTemplate).toBe(EMBEDDING_TEMPLATE)
   })
@@ -111,6 +118,20 @@ describe('embedding config compiler', () => {
     expect(config.baseUrl).toBe('http://localhost:11434')
   })
 
+  it('openai embeddings no longer read embedding.base_url — the gateway override is gone', () => {
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.base_url', 'https://openrouter.ai/api/v1')
+    upsertSetting('embedding.api_key', 'sk-legacy')
+
+    // Semantic Search no longer carries a base-URL setting: even a stale
+    // stored value is ignored and OpenAI embeddings use the default
+    // endpoint (baseUrl: null).
+    const config = getEmbeddingConfig()
+    expect(config.baseUrl).toBeNull()
+    expect(config.apiKey).toBe('sk-legacy')
+  })
+
   it('openai embeddings reuse api_key.openai and honor the legacy embedding key only as a fallback', () => {
     upsertSetting('embedding.provider', 'openai')
     upsertSetting('embedding.model', 'text-embedding-3-small')
@@ -123,13 +144,6 @@ describe('embedding config compiler', () => {
 
     deleteSetting('embedding.api_key')
     expect(getEmbeddingConfig().apiKey).toBeNull()
-  })
-
-  it('openai embeddings keep embedding.base_url as the gateway override (no LLM-side base URL exists)', () => {
-    upsertSetting('embedding.provider', 'openai')
-    upsertSetting('embedding.model', 'text-embedding-3-small')
-    upsertSetting('embedding.base_url', 'https://openrouter.ai/api/v1')
-    expect(getEmbeddingConfig().baseUrl).toBe('https://openrouter.ai/api/v1')
   })
 
   it('never exposes the secret in status payloads', () => {

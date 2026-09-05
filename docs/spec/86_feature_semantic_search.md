@@ -64,8 +64,14 @@ Stored in the SQLite `settings` table (see [ADR 001](./../adr/001-settings-dual-
 | `embedding.provider` | `openai` (cloud) or `ollama` (local) |
 | `embedding.model` | Provider-specific embedding model (e.g. `text-embedding-3-small`, `nomic-embed-text`) |
 | `embedding.dimensions` | Optional explicit vector dimension (must match model output) |
-| `embedding.base_url` | OpenAI-only optional override for OpenAI-compatible gateways (e.g. OpenRouter). Rejected for the `ollama` provider, which reuses `ollama.base_url` |
 | `embedding.api_key` | Legacy per-embedding credential; honored only as a fallback when `api_key.openai` is absent. Never exposed to clients |
+
+There is **no** `embedding.base_url`: Semantic Search carries no base-URL
+setting for any provider. Connection endpoints live only in AI Providers
+(`ollama.base_url`) or are the provider default (OpenAI); OpenAI-compatible
+gateway overrides are no longer a Semantic Search concern (a stale
+`embedding.base_url` key is ignored and cleaned up on the next settings
+update).
 
 ### Architecture
 
@@ -86,7 +92,7 @@ Stored in the SQLite `settings` table (see [ADR 001](./../adr/001-settings-dual-
   Manually clipped (`clip`) articles are intentionally excluded from automatic
   summarization and embeddings in v1, including after a manual summary.
 - **Staging rebuild.** Enabling, disabling, or changing provider/model/
-  dimensions/base_url triggers `requestSearchRebuild()`: the app builds a fresh
+  dimensions triggers `requestSearchRebuild()`: the app builds a fresh
   `articles_staging` index with the managed embedder, batches in all active
   articles, waits for tasks (aborting before the swap if a document batch
   failed, e.g. embedding generation failure), swaps atomically, and deletes the
@@ -120,14 +126,17 @@ Stored in the SQLite `settings` table (see [ADR 001](./../adr/001-settings-dual-
 
 - **OpenAI** — native Meilisearch embedder (`source: openAi`),
   `text-embedding-3-small` default (1536 dims). Reuses `api_key.openai` from
-  the LLM provider section; optional `embedding.base_url` is a gateway
-  override for OpenAI-compatible endpoints (e.g. OpenRouter). HTTPS enforced
-  for public/cloud URLs.
+  the LLM provider section; there is no base-URL setting anywhere — the
+  embedder uses Meilisearch's default OpenAI endpoint (`https://api.openai.com/v1`).
+  HTTPS enforced for public/cloud URLs.
 - **Ollama** — native Meilisearch embedder (`source: ollama`), e.g.
   `nomic-embed-text`. Reuses `ollama.base_url` (with the same env/default
-  fallback chain as the LLM provider) plus `ollama.custom_headers`; a separate
-  `embedding.base_url` is rejected for this provider. In `docker compose`
-  deployments, Meilisearch must reach Ollama — the compose files add
+  fallback chain as the LLM provider) plus `ollama.custom_headers`. Meilisearch
+  validates that an `ollama` embedder URL ends with `/api/embed` or
+  `/api/embeddings`, so the embedder URL is the tokenized proxy URL plus
+  `/api/embed` (the internal proxy forwards `/<token>/api/embed` to the
+  configured Ollama endpoint). In `docker compose` deployments, Meilisearch
+  must reach Ollama through the proxy — the compose files add
   `extra_hosts: host.docker.internal -> host-gateway` for Linux; on Docker
   Desktop it resolves automatically.
 
@@ -172,17 +181,18 @@ Non-secret configuration + prerequisite + runtime status:
 ```
 
 Never contains the credential. `prerequisite.reason` explains the first unmet
-dependency when `met` is false.
+dependency when `met` is false. `base_url` is a read-only derived value (the
+reused `ollama.base_url`, or `null` for OpenAI — no base URL is configurable
+here).
 
 #### PATCH /api/settings/search-embedding
 
-Updates `enabled`, `provider`, `model`, `dimensions`, and — for `openai` — a
-gateway-override `base_url`. A `base_url` for the `ollama` provider is
-rejected with HTTP 400 (it reuses `ollama.base_url`). Enabling
-(`enabled:"on"`) is rejected with HTTP 400 unless the prerequisite is met, an
-OpenAI credential exists (reused `api_key.openai`, else the legacy
-`embedding.api_key` fallback), and the provider/model are set. Embedder-
-relevant changes kick an asynchronous rebuild (never awaited by
+Updates `enabled`, `provider`, `model`, and `dimensions` only — the request
+body has no `base_url` field, so nothing in Semantic Search can set or change
+an endpoint. Enabling (`enabled:"on"`) is rejected with HTTP 400 unless the
+prerequisite is met, an OpenAI credential exists (reused `api_key.openai`,
+else the legacy `embedding.api_key` fallback), and the provider/model are set.
+Embedder-relevant changes kick an asynchronous rebuild (never awaited by
 the caller); configuration and credential changes are rejected with HTTP 409
 while a rebuild is active. Disabling rebuilds keyword-only so no embedder is
 left behind.

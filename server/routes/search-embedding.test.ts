@@ -29,7 +29,17 @@ vi.mock('../search/sync.js', () => {
   }
 })
 
+// The transport stays real by default (the ollama connectivity test runs
+// the pinned request helper against a local HTTP server); the openai
+// redaction test overrides the transport per-call so the default OpenAI
+// endpoint and reused credential derivation can be probed offline.
+vi.mock('../search/endpoint-safety.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../search/endpoint-safety.js')>()
+  return { ...actual, safeEmbeddingRequest: vi.fn(actual.safeEmbeddingRequest) }
+})
+
 import { requestSearchRebuild, isRebuilding, getSearchIndexRuntime } from '../search/sync.js'
+import { safeEmbeddingRequest } from '../search/endpoint-safety.js'
 
 const mockRequestRebuild = vi.mocked(requestSearchRebuild)
 const mockIsRebuilding = vi.mocked(isRebuilding)
@@ -184,35 +194,34 @@ describe('PATCH /api/settings/search-embedding', () => {
     expect(mockRequestRebuild).not.toHaveBeenCalled()
   })
 
-  it('validates provider, dimensions and base_url', async () => {
+  it('validates provider and dimensions; base_url is no longer an accepted semantic-search setting', async () => {
     let res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'nope' }, headers: json })
     expect(res.statusCode).toBe(400)
 
     res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { dimensions: '0' }, headers: json })
     expect(res.statusCode).toBe(400)
 
-    res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'openai', base_url: 'http://example.com/v1' }, headers: json })
+    // The Semantic Search base-URL setting is gone entirely: a request
+    // carrying only base_url has nothing left to update.
+    res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { base_url: 'https://openrouter.ai/api/v1' }, headers: json })
     expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/No fields to update/)
 
-    // Ollama no longer accepts a separate embedding base URL: it reuses
-    // ollama.base_url from the LLM provider section.
-    res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'ollama', base_url: 'http://localhost:11434' }, headers: json })
-    expect(res.statusCode).toBe(400)
-    expect(res.json().error).toMatch(/AI Providers|base URL/i)
-
-    // Operator LAN endpoints are usable for the OpenAI gateway override.
-    res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'openai', base_url: 'https://192.168.1.1' }, headers: json })
+    // Even combined with a real field, base_url must never be persisted.
+    res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'openai', base_url: 'https://openrouter.ai/api/v1' }, headers: json })
     expect(res.statusCode).toBe(200)
-    expect(getSetting('embedding.base_url')).toBe('https://192.168.1.1')
+    expect(getSetting('embedding.provider')).toBe('openai')
+    expect(getSetting('embedding.base_url')).toBeUndefined()
   })
 
-  it('validates a retained base URL when switching providers', async () => {
+  it('cleans a stale legacy embedding.base_url on the next config update', async () => {
     upsertSetting('embedding.provider', 'ollama')
     upsertSetting('embedding.model', 'nomic-embed-text')
-    upsertSetting('embedding.base_url', 'http://ollama:11434')
-    const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'openai' }, headers: json })
-    expect(res.statusCode).toBe(400)
-    expect(getSetting('embedding.provider')).toBe('ollama')
+    upsertSetting('embedding.base_url', 'http://stale-legacy:11434')
+
+    const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { model: 'nomic-embed-text-v2' }, headers: json })
+    expect(res.statusCode).toBe(200)
+    expect(getSetting('embedding.base_url')).toBeUndefined()
   })
 })
 
@@ -296,8 +305,10 @@ describe('POST /api/settings/search-embedding/key', () => {
 
 describe('POST /api/settings/search-embedding/test', () => {
   // The probe runs through the pinned, redirect-validating request helper
-  // (node:http), so these tests exercise the real request path against a
-  // local HTTP server instead of stubbing global fetch.
+  // (node:http), so these tests execute the real request path against a
+  // local HTTP server instead of stubbing global fetch. The base URL is
+  // derived server-side from the provider connection settings (Ollama
+  // reuses ollama.base_url) — the request body carries no base URL.
   let respond: (req: http.IncomingMessage, res: http.ServerResponse) => void
   let server: http.Server
   let baseUrl: string
@@ -323,8 +334,17 @@ describe('POST /api/settings/search-embedding/test', () => {
     await new Promise<void>(resolve => server.close(() => resolve()))
   })
 
-  it('validates connectivity and reports dimensions', async () => {
-    const res = await app.inject({ method: 'POST', url: '/api/settings/search-embedding/test', payload: { provider: 'openai', model: 'text-embedding-3-small', apiKey: 'sk-test', base_url: `${baseUrl}/v1` }, headers: json })
+  it('validates connectivity and reports dimensions using the Ollama provider base URL from AI Providers', async () => {
+    // The connection settings come from the AI Providers section
+    // (ollama.base_url), never from the request body.
+    upsertSetting('embedding.provider', 'ollama')
+    upsertSetting('embedding.model', 'nomic-embed-text')
+    upsertSetting('ollama.base_url', baseUrl)
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ embeddings: [new Array(1536).fill(0.1)] }))
+    }
+    const res = await app.inject({ method: 'POST', url: '/api/settings/search-embedding/test', payload: { provider: 'ollama', model: 'nomic-embed-text' }, headers: json })
     expect(res.statusCode).toBe(200)
     expect(res.json().dimensions).toBe(1536)
   })
@@ -338,20 +358,34 @@ describe('POST /api/settings/search-embedding/test', () => {
     expect(res.json().error).toMatch(/API key/)
   })
 
-  it('redacts credentials echoed by an embedding endpoint', async () => {
-    respond = (_req, res) => {
-      res.writeHead(401, { 'content-type': 'text/plain' })
-      res.end('authorization Bearer sk-echoed-secret')
-    }
+  it('probes the default OpenAI endpoint with the reused provider credential and redacts echoed secrets', async () => {
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('api_key.openai', 'sk-echoed-secret')
+    const safe = vi.mocked(safeEmbeddingRequest)
+    safe.mockClear()
+    safe.mockImplementationOnce(async () => ({
+      statusCode: 401,
+      headers: { 'content-type': 'text/plain' },
+      body: Buffer.from('authorization Bearer sk-echoed-secret'),
+    }))
+
     const res = await app.inject({
       method: 'POST',
       url: '/api/settings/search-embedding/test',
-      payload: { provider: 'openai', model: 'text-embedding-3-small', apiKey: 'sk-echoed-secret', base_url: `${baseUrl}/v1` },
+      payload: { provider: 'openai', model: 'text-embedding-3-small' },
       headers: json,
     })
     expect(res.statusCode).toBe(400)
     expect(res.body).not.toContain('sk-echoed-secret')
     expect(res.json().error).toContain('[redacted]')
+
+    // No base URL is configurable anymore: the probe targets the default
+    // OpenAI endpoint and carries the credential reused from AI Providers.
+    expect(safe).toHaveBeenCalledTimes(1)
+    const [url, , headers] = safe.mock.calls[0]
+    expect(url).toBe('https://api.openai.com/v1/embeddings')
+    expect(headers.authorization).toBe('Bearer sk-echoed-secret')
   })
 })
 

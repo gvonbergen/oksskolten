@@ -62,23 +62,20 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
     return () => clearTimeout(timer)
   }, [mutate, settings.summaryAuto, settings.summaryProvider, settings.summaryModel])
 
-  // Local form state (initialized from server once). The provider base URL
-  // and API key are NOT configured here: Ollama reuses ollama.base_url /
-  // ollama.custom_headers and OpenAI reuses api_key.openai from the LLM
-  // provider section (AI Providers). The only local input is the OpenAI
-  // gateway override (embedding.base_url) — there is no LLM-side OpenAI
-  // base URL to reuse.
+  // Local form state (initialized from server once). Connection settings
+  // (base URL and API key) are NOT configured here at all: Ollama reuses
+  // ollama.base_url / ollama.custom_headers and OpenAI reuses
+  // api_key.openai from the LLM provider section (AI Providers), with the
+  // default OpenAI endpoint. Only embedding-specific inputs remain local.
   const [provider, setProvider] = useState<EmbeddingProvider | null>(null)
   const [modelInput, setModelInput] = useState('')
   const [dimensionsInput, setDimensionsInput] = useState('')
-  const [openaiBaseUrlInput, setOpenaiBaseUrlInput] = useState('')
   const [initialized, setInitialized] = useState(false)
   useEffect(() => {
     if (!status || initialized) return
     setProvider(status.provider)
     setModelInput(status.model || '')
     setDimensionsInput(status.dimensions ? String(status.dimensions) : '')
-    setOpenaiBaseUrlInput(status.provider === 'openai' ? (status.base_url || '') : '')
     setInitialized(true)
   }, [status, initialized])
 
@@ -101,10 +98,9 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
     return (
       provider !== status.provider ||
       modelInput !== (status.model || '') ||
-      dims !== status.dimensions ||
-      (provider === 'openai' && openaiBaseUrlInput !== (status.base_url || ''))
+      dims !== status.dimensions
     )
-  }, [status, provider, modelInput, dimensionsInput, openaiBaseUrlInput])
+  }, [status, provider, modelInput, dimensionsInput])
 
   const handleEnable = useCallback(async (value: 'on' | 'off') => {
     if (saving) return
@@ -127,14 +123,11 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
     setMessage(null)
     setTestResult(null)
     try {
-      // base_url is only sent for OpenAI (gateway override); Ollama reuses
-      // the LLM provider's base URL and must not carry a duplicate here.
       const body: Record<string, unknown> = {
         provider: provider ?? '',
         model: modelInput,
         dimensions: dimensionsInput,
       }
-      if (provider === 'openai') body.base_url = openaiBaseUrlInput
       await apiPatch('/api/settings/search-embedding', body)
       void mutate()
       showMessage(t('settings.semanticSaved'), 'success')
@@ -143,7 +136,7 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
     } finally {
       setSaving(false)
     }
-  }, [saving, provider, modelInput, dimensionsInput, openaiBaseUrlInput, mutate, t])
+  }, [saving, provider, modelInput, dimensionsInput, mutate, t])
 
   const handleTest = useCallback(async () => {
     if (testing) return
@@ -156,7 +149,6 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
       if (provider) body.provider = provider
       if (modelInput) body.model = modelInput
       if (dimensionsInput) body.dimensions = Number(dimensionsInput)
-      if (provider === 'openai' && openaiBaseUrlInput) body.base_url = openaiBaseUrlInput
       const res = await apiPost('/api/settings/search-embedding/test', body) as { ok: boolean; model?: string; dimensions?: number }
       setTestResult({ ok: true, text: t('settings.semanticTestOk', { model: res.model || '', dimensions: String(res.dimensions ?? '') }) })
     } catch (err: unknown) {
@@ -165,7 +157,7 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
     } finally {
       setTesting(false)
     }
-  }, [testing, provider, modelInput, dimensionsInput, openaiBaseUrlInput, t])
+  }, [testing, provider, modelInput, dimensionsInput, t])
 
   const handleRebuild = useCallback(async () => {
     setRebuildConfirm(false)
@@ -270,14 +262,6 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
                     onClick={() => {
                       if (provider === p) return
                       setProvider(p)
-                      // The OpenAI gateway override is scoped per provider: when
-                      // switching away and back to openai, restore the persisted
-                      // openai override only if openai is the active provider,
-                      // never the reused ollama base URL. Clicking the
-                      // already-active tab keeps unsaved edits.
-                      setOpenaiBaseUrlInput(
-                        p === 'openai' ? (status?.provider === 'openai' ? (status.base_url || '') : '') : '',
-                      )
                       const def = EMBEDDING_DEFAULT_MODELS[p]
                       setModelInput(prev =>
                         EMBEDDING_MODELS[p].some(model => model.value === prev) ? prev : def,
@@ -326,26 +310,6 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
                 placeholder={provider ? String(selectedModel?.find(m => m.value === modelInput)?.dimensions ?? '') : ''}
                 className="w-28 py-1.5"
               />
-            </FormField>
-
-            <FormField label={t('settings.semanticBaseUrl')} hint={t('settings.semanticBaseUrlDesc')} compact>
-              {provider === 'openai' ? (
-                <Input
-                  type="text"
-                  value={openaiBaseUrlInput}
-                  onChange={e => setOpenaiBaseUrlInput(e.target.value)}
-                  placeholder="https://api.openai.com/v1"
-                  className="py-1.5"
-                />
-              ) : (
-                /* Reused from the Ollama LLM provider — shown, not edited here */
-                <div>
-                  <div className="px-2.5 py-1.5 text-xs rounded-lg bg-bg-subtle border border-border text-text font-mono select-none">
-                    {status?.base_url || OLLAMA_DEFAULT_URL}
-                  </div>
-                  <p className="text-[11px] text-muted/80 mt-1">{t('settings.semanticBaseUrlReused')}</p>
-                </div>
-              )}
             </FormField>
 
             {/* Credential is reused from the LLM provider section — no second key input */}

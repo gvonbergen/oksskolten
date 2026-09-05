@@ -11,7 +11,6 @@ import {
   EMBEDDING_SETTING_PROVIDER,
   EMBEDDING_SETTING_MODEL,
   EMBEDDING_SETTING_DIMENSIONS,
-  EMBEDDING_SETTING_BASE_URL,
   EMBEDDING_SETTING_API_KEY,
   getEmbeddingConfig,
   getEmbeddingPrerequisite,
@@ -22,7 +21,6 @@ import {
   type EmbeddingProvider,
 } from '../search/embedding.js'
 import { getSearchIndexRuntime, isRebuilding, requestSearchRebuild } from '../search/sync.js'
-import { validateEmbeddingEndpoint } from '../search/endpoint-safety.js'
 
 const EmbeddingPatchBody = z.object({
   enabled: z.enum(['on', 'off'], { error: 'enabled must be "on" or "off"' }).optional(),
@@ -34,14 +32,12 @@ const EmbeddingPatchBody = z.object({
       z.literal(''),
     ])
     .optional(),
-  base_url: z.string().max(500).optional(),
 })
 
 const EmbeddingTestBody = z.object({
   provider: z.enum(EMBEDDING_PROVIDERS).optional(),
   model: z.string().max(200).optional(),
   dimensions: z.coerce.number().int().min(1).max(8192).optional(),
-  base_url: z.string().max(500).optional(),
   apiKey: z.string().max(1000).optional(),
 })
 
@@ -115,37 +111,11 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
         : body.dimensions === ''
           ? null
           : body.dimensions
-      const storedBaseUrl = getSetting(EMBEDDING_SETTING_BASE_URL) || null
-      const providedBaseUrl = body.base_url === undefined ? undefined : body.base_url.trim() || null
-      // base_url is an OpenAI-only override for OpenAI-compatible gateways.
-      // Ollama embeddings reuse the base URL (and custom headers) already
-      // configured for the Ollama LLM provider — the single source of truth
-      // for that provider's connection. A stale stored value is cleaned up
-      // when the Ollama provider is selected.
-      if (nextProvider === 'ollama' && providedBaseUrl != null) {
-        reply.status(400).send({
-          error: 'Ollama embeddings reuse the base URL configured for the Ollama provider in Settings > AI Providers; a separate embedding base URL is not used',
-        })
-        return
-      }
-      const nextBaseUrl = nextProvider === 'ollama' ? null : (providedBaseUrl === undefined ? storedBaseUrl : providedBaseUrl)
-      if (nextBaseUrl !== null) {
-        if (!nextProvider) {
-          reply.status(400).send({ error: 'Select a provider before configuring base_url' })
-          return
-        }
-        const urlCheck = await validateEmbeddingEndpoint(nextBaseUrl)
-        if (!urlCheck.ok) {
-          reply.status(400).send({ error: urlCheck.error })
-          return
-        }
-      }
       const enabledChanged = body.enabled !== undefined && body.enabled !== (current.enabled ? 'on' : 'off')
       const providerChanged = body.provider !== undefined && body.provider !== current.provider
       const dimensionsChanged = nextDimensions !== current.dimensions
-      const baseUrlChanged = nextBaseUrl !== storedBaseUrl
       const modelWasChanged = modelChanged(body, current)
-      const configChanged = enabledChanged || providerChanged || modelWasChanged || dimensionsChanged || baseUrlChanged
+      const configChanged = enabledChanged || providerChanged || modelWasChanged || dimensionsChanged
 
       if (isRebuilding() && configChanged) {
         reply.status(409).send({ error: 'An index rebuild is already in progress; retry this configuration change when it finishes' })
@@ -194,11 +164,12 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
         else upsertSetting(EMBEDDING_SETTING_DIMENSIONS, String(nextDimensions))
         embedderRelevant.push('dimensions')
       }
-      if (baseUrlChanged) {
-        if (nextBaseUrl === null) deleteSetting(EMBEDDING_SETTING_BASE_URL)
-        else upsertSetting(EMBEDDING_SETTING_BASE_URL, nextBaseUrl)
-        embedderRelevant.push('base_url')
-      }
+
+      // Connection settings live only in AI Providers now: a stale
+      // `embedding.base_url` stored before Semantic Search lost its base-URL
+      // setting is cleaned up on the next config update (OpenAI embeddings
+      // always use the default endpoint).
+      deleteSetting('embedding.base_url')
 
       // Embedder-relevant changes are applied to the index through the
       // managed configuration: kick a rebuild (guarded against concurrent
@@ -272,7 +243,6 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
         provider: (body.provider ?? current.provider) as EmbeddingProvider | null,
         model: body.model !== undefined && body.model !== '' ? body.model : current.model,
         dimensions: body.dimensions ?? current.dimensions,
-        baseUrl: body.base_url !== undefined ? (body.base_url || null) : current.baseUrl,
         apiKey: body.apiKey !== undefined ? (body.apiKey || null) : current.apiKey,
       }
       if (!candidate.provider) {
@@ -282,13 +252,6 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
       if (candidate.provider === 'openai' && !candidate.apiKey) {
         reply.status(400).send({ error: 'An API key is required to test the OpenAI embedding provider' })
         return
-      }
-      if (candidate.baseUrl) {
-        const urlCheck = await validateEmbeddingEndpoint(candidate.baseUrl)
-        if (!urlCheck.ok) {
-          reply.status(400).send({ error: urlCheck.error })
-          return
-        }
       }
       const result = await testEmbeddingConnection(candidate)
       if (!result.ok) {
