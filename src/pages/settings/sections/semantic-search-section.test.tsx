@@ -124,7 +124,7 @@ describe('SemanticSearchSection — provider connection settings reuse', () => {
       base_url: '',
     }))
     // The stored Ollama address is never sent to the OpenAI embedder.
-    expect(JSON.stringify(apiPatch.mock.calls[0][1])).not.toContain('10.8.0.1')
+    expect(JSON.stringify(vi.mocked(apiPatch).mock.calls[0][1])).not.toContain('10.8.0.1')
   })
 
   it('restores the persisted OpenAI override when switching back to openai', () => {
