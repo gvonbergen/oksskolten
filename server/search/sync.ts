@@ -268,7 +268,8 @@ export async function rebuildSearchIndex(): Promise<void> {
   changeLog = pendingChangeLog ?? changeLog ?? []
   pendingChangeLog = null
   const config = getEmbeddingConfig()
-  const embedderPlanned = !!buildEmbeddersSettings(config) && isEmbeddingPrerequisiteMet()
+  const prerequisiteMet = isEmbeddingPrerequisiteMet()
+  const embedderPlanned = !!buildEmbeddersSettings(config) && prerequisiteMet
   const settings = embedderPlanned ? resolveIndexSettings(config) : { ...INDEX_SETTINGS }
   lastRebuild = {
     startedAt: Date.now(),
@@ -331,7 +332,7 @@ export async function rebuildSearchIndex(): Promise<void> {
       is_unread: Boolean(row.is_unread),
       is_liked: Boolean(row.is_liked),
       is_bookmarked: Boolean(row.is_bookmarked),
-    }, config))
+    }, config, prerequisiteMet))
     lastRebuild = { ...lastRebuild!, totalDocuments: docs.length }
 
     for (let i = 0; i < docs.length; i += BATCH_SIZE) {

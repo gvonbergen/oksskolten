@@ -470,7 +470,7 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
   )
 }
 
-function lastRebuildProgress(lastRebuild: EmbeddingStatus['last_rebuild']): { processed: string; total: string } | null {
+function lastRebuildProgress(lastRebuild: EmbeddingStatus['last_rebuild'] | undefined): { processed: string; total: string } | null {
   if (!lastRebuild || lastRebuild.totalDocuments == null) return null
   return {
     processed: String(lastRebuild.processedDocuments ?? 0),

@@ -32,6 +32,7 @@ vi.mock('../search/client.js', () => ({
     if (opts.unread === true) parts.push('is_unread = true')
     return parts.length > 0 ? parts.join(' AND ') : undefined
   }),
+  hasMeaningfulSearchQuery: vi.fn((query: string) => (query.match(/[\p{L}\p{N}]/gu)?.length ?? 0) >= 2),
   meiliSearch: vi.fn(async () => ({ hits: [], estimatedTotalHits: 0 })),
   searchArticlesWithHybrid: (...args: unknown[]) => mockSearchWithHybrid(...(args as Parameters<typeof mockSearchWithHybrid>)),
 }))

@@ -65,7 +65,6 @@ describe('embedding proxy rate limiting', () => {
 describe('embedding proxy endpoint forwarding', () => {
   let app: FastifyInstance
   let upstream: http.Server
-  let baseUrl: string
   const received: Array<{ url: string | undefined; body: string }> = []
 
   beforeEach(() => {

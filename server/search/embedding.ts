@@ -100,7 +100,7 @@ export function isSummaryModelValid(provider: string, model: string): boolean {
   return knownModels.length === 0 || knownModels.includes(model)
 }
 
-export function getSummaryProviderModel(readSetting: (key: string) => string | null = getSetting): SummaryProviderModel {
+export function getSummaryProviderModel(readSetting: (key: string) => string | null | undefined = getSetting): SummaryProviderModel {
   const configuredProvider = readSetting('summary.provider')
   const provider = configuredProvider || TASK_DEFAULTS.summarize.provider
   const configuredModel = readSetting('summary.model')
@@ -270,8 +270,9 @@ export function matchesExpectedEmbedder(
 export function applyEmbeddingVectors<T extends { summary?: string | null; feed_type?: string }>(
   doc: T,
   config: EmbeddingConfig = getEmbeddingConfig(),
+  prerequisiteMet: boolean = isEmbeddingPrerequisiteMet(),
 ): T & { _vectors?: Record<string, null> } {
-  if (!buildEmbeddersSettings(config) || !isEmbeddingPrerequisiteMet() || doc.feed_type === 'clip' || !doc.summary?.trim()) {
+  if (!buildEmbeddersSettings(config) || !prerequisiteMet || doc.feed_type === 'clip' || !doc.summary?.trim()) {
     return { ...doc, _vectors: { [EMBEDDER_NAME]: null } }
   }
   return doc

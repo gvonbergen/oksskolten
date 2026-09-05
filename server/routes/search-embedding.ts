@@ -49,7 +49,7 @@ const EmbeddingKeyBody = z.object({
 })
 
 function redactEmbeddingError(error: string, secrets: (string | null | undefined)[]): string {
-  return secrets.reduce((safe, secret) => {
+  return secrets.reduce<string>((safe, secret) => {
     if (!secret) return safe
     return safe.split(secret).join('[redacted]')
   }, error)
