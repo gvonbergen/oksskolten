@@ -17,6 +17,7 @@ Typical RSS readers only display the title and summary provided by the feed, req
 > - [83_feature_similarity.md](./83_feature_similarity.md) — Similar Article Detection
 > - [84_feature_keyboard_navigation.md](./84_feature_keyboard_navigation.md) — Keyboard Navigation
 > - [85_feature_ollama.md](./85_feature_ollama.md) — Ollama LLM Provider
+> - [86_feature_semantic_search.md](./86_feature_semantic_search.md) — Semantic Search (Embeddings)
 > - [90_perf_retry_backoff.md](./90_perf_retry_backoff.md) — Exponential Backoff for Article Retry
 > - [91_perf_score_recalculation.md](./91_perf_score_recalculation.md) — Score Recalculation Optimization
 
@@ -91,6 +92,7 @@ All containers are connected via an `internal` bridge network. No ports are expo
 | `LOG_LEVEL` | Pino log level | | Default `info` |
 | `MEILI_URL` | Meilisearch URL | | Default `http://localhost:7700` |
 | `MEILI_MASTER_KEY` | Meilisearch master key | | Connects without key if not set |
+| `EMBEDDING_PROXY_TOKEN` | Internal embedding-proxy token | | Keeps the managed embedder URL stable across restarts (see [86_feature_semantic_search.md](./86_feature_semantic_search.md)) |
 | `GIT_COMMIT` | Git commit SHA at build time | | Returned in `/api/health`. Defaults to `'dev'` |
 | `GIT_TAG` | Git tag at build time | | Returned in `/api/health`. Defaults to `'dev'` |
 | `BUILD_DATE` | Build date (ISO 8601) | | Returned in `/api/health` |
