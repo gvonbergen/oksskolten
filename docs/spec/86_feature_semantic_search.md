@@ -12,7 +12,23 @@ keyword ranking using Meilisearch's managed hybrid search. This resolves
 first-class managed index configuration, so the periodic six-hour rebuild and
 startup reconciliation never drop it.
 
-## Product rules (v1)
+## Motivation
+
+- **Better recall for paraphrased queries.** Keyword search misses articles
+  that use different wording than the query; embedding-assisted hybrid search
+  closes that gap without abandoning the existing keyword ranking.
+- **Embeddings must survive index rebuilds.** Historically embedder settings
+  were re-applied inconsistently across index lifecycle paths (staging rebuild,
+  first-run production, populated-startup reconcile), causing semantic search
+  to silently degrade to keyword-only (#117). Making the embedder part of the
+  managed index settings fixes this at the root.
+- **Privacy-conscious opt-in.** Embeddings send title + summary to a provider,
+  so they are separately opt-in with a clear cloud-data warning, and never
+  include full article body text.
+
+## Design
+
+### Product rules (v1)
 
 - **Disabled by default.** A fresh installation has embeddings OFF.
 - **Opt-in only.** Enabling happens through Settings → Integration →
@@ -34,7 +50,7 @@ startup reconciliation never drop it.
   deterministic title + Dice algorithm; semantic relatedness is not duplicate
   detection and does not affect auto-mark-read behavior.
 
-## Settings keys
+### Settings keys
 
 Stored in the SQLite `settings` table (see [ADR 001](./../adr/001-settings-dual-storage.md)):
 
@@ -48,7 +64,7 @@ Stored in the SQLite `settings` table (see [ADR 001](./../adr/001-settings-dual-
 | `embedding.base_url` | Optional endpoint override (OpenAI-compatible URL, or Ollama server URL) |
 | `embedding.api_key` | Secret credential; never exposed to clients |
 
-## Architecture
+### Architecture
 
 - **Managed embedder.** `buildEmbeddersSettings(config)` compiles the current
   embedding config into a Meilisearch `embedders` object (named
@@ -97,7 +113,7 @@ Stored in the SQLite `settings` table (see [ADR 001](./../adr/001-settings-dual-
   short TTL and surfaced in the settings UI. Rebuild status includes processed
   and total document counts.
 
-## Providers
+### Providers
 
 - **OpenAI** — native Meilisearch embedder (`source: openAi`),
   `text-embedding-3-small` default (1536 dims), requires the embedding API key.
@@ -115,7 +131,7 @@ generation; the UI shows a privacy notice before activation that reflects the
 selected provider (cloud transfer for OpenAI, local endpoint wording for
 Ollama).
 
-## Automatic summarization
+### Automatic summarization
 
 When `summary.auto` is `on` and the summary provider/model are configured, the
 fetch pipeline (`processArticle`) fires `autoSummarizeArticle()` for each newly
@@ -127,9 +143,9 @@ for embedding.
 Failures are logged and never block article availability (on-demand
 summarization remains available from the article UI).
 
-## API
+### API
 
-### GET /api/settings/search-embedding
+#### GET /api/settings/search-embedding
 
 Non-secret configuration + prerequisite + runtime status:
 
@@ -152,7 +168,7 @@ Non-secret configuration + prerequisite + runtime status:
 Never contains the credential. `prerequisite.reason` explains the first unmet
 dependency when `met` is false.
 
-### PATCH /api/settings/search-embedding
+#### PATCH /api/settings/search-embedding
 
 Updates `enabled`, `provider`, `model`, `dimensions`, `base_url`. Enabling
 (`enabled:"on"`) is rejected with HTTP 400 unless the prerequisite is met, an
@@ -162,12 +178,12 @@ the caller); configuration and credential changes are rejected with HTTP 409
 while a rebuild is active. Disabling rebuilds keyword-only so no embedder is
 left behind.
 
-### POST /api/settings/search-embedding/key
+#### POST /api/settings/search-embedding/key
 
 Body `{ "apiKey": "..." }` stores the credential; empty string deletes it.
 Responses only ever report `configured`.
 
-### POST /api/settings/search-embedding/test
+#### POST /api/settings/search-embedding/test
 
 Validates provider/model/credential connectivity with a one-request probe
 (`POST /v1/embeddings` for OpenAI, `POST /api/embed` for Ollama) against
@@ -175,12 +191,12 @@ real APIs, including optional candidate overrides, and checks the returned
 vector dimension. Used by the "Test connection" button and available for
 tooling.
 
-### POST /api/settings/search-embedding/rebuild
+#### POST /api/settings/search-embedding/rebuild
 
 Triggers an asynchronous backfill/reindex of all articles (title+summary).
 Returns 400 when disabled, 409 while a rebuild is already running.
 
-### GET /api/articles/search
+#### GET /api/articles/search
 
 Extended response with `search_mode`: `"keyword"`, `"hybrid"`, or
 `"keyword-fallback"`. Existing fields (`articles`, `has_more`) and all filters,
@@ -188,7 +204,7 @@ pagination, and ranking are unchanged. 503 still means the keyword index is
 not built. A semantic failure yields keyword results, never an empty response
 caused only by embedding failure.
 
-## Chat / MCP
+### Chat / MCP
 
 `search_articles` uses the same hybrid + keyword-fallback path automatically.
 Its description was updated to "hybrid semantic + keyword search when
@@ -196,7 +212,7 @@ available; keyword fallback otherwise". A server-side log line records actual
 fallbacks; the tool's JSON array output format is unchanged. `get_similar_articles`
 stays keyword-based (semantic relatedness is not duplicate detection).
 
-## Failure & operational behavior
+### Failure & operational behavior
 
 - Provider down at indexing time → document batch task fails → rebuild aborts
   before swap → previous production index stays usable (keyword + stale
@@ -210,7 +226,7 @@ stays keyword-based (semantic relatedness is not duplicate detection).
   settings change, which stalls on a dead endpoint; staging keeps that off the
   live index).
 
-## Testing
+### Testing
 
 - Unit: config compiler (disabled/openai/ollama), prerequisite logic, secret
   redaction, non-secret fingerprint, per-document `_vectors` handling,
