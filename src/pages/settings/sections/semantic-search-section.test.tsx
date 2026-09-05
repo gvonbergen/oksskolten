@@ -144,4 +144,48 @@ describe('SemanticSearchSection — provider connection settings reuse', () => {
     fireEvent.click(screen.getByText('settings.semanticProviderOpenai'))
     expect(screen.getByDisplayValue('https://openrouter.ai/api/v1')).toBeTruthy()
   })
+
+  it('keeps unsaved edited override when clicking the already-active provider tab', () => {
+    swrData['/api/settings/search-embedding'] = baseStatus({
+      provider: 'openai',
+      model: 'text-embedding-3-small',
+      base_url: 'https://openrouter.ai/api/v1',
+      api_key_configured: true,
+    })
+    render(<SemanticSearchSection t={t} settings={{} as never} />)
+
+    // Type an unsaved gateway override.
+    const field = screen.getByDisplayValue('https://openrouter.ai/api/v1')
+    fireEvent.change(field, { target: { value: 'https://gateway.example/v1' } })
+    expect(screen.getByDisplayValue('https://gateway.example/v1')).toBeTruthy()
+
+    // Clicking the already-active 'openai' tab must not discard the edit.
+    fireEvent.click(screen.getByText('settings.semanticProviderOpenai'))
+    fireEvent.click(screen.getByText('settings.semanticSave'))
+
+    expect(apiPatch).toHaveBeenCalledWith('/api/settings/search-embedding', expect.objectContaining({
+      provider: 'openai',
+      base_url: 'https://gateway.example/v1',
+    }))
+  })
+
+  it('switching providers resets the override so typed edits never cross providers', () => {
+    swrData['/api/settings/search-embedding'] = baseStatus({
+      provider: 'openai',
+      model: 'text-embedding-3-small',
+      base_url: 'https://openrouter.ai/api/v1',
+      api_key_configured: true,
+    })
+    render(<SemanticSearchSection t={t} settings={{} as never} />)
+
+    const field = screen.getByDisplayValue('https://openrouter.ai/api/v1')
+    fireEvent.change(field, { target: { value: 'http://10.8.0.1:11434' } })
+
+    // Switch to ollama (unsaved cross-provider value is cleared, not kept)
+    // then switch back to openai: the persisted override is restored, not the
+    // typed ollama address.
+    fireEvent.click(screen.getByText('settings.semanticProviderOllama'))
+    fireEvent.click(screen.getByText('settings.semanticProviderOpenai'))
+    expect(screen.getByDisplayValue('https://openrouter.ai/api/v1')).toBeTruthy()
+  })
 })

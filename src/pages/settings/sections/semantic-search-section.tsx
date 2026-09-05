@@ -268,19 +268,20 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
                     key={p}
                     type="button"
                     onClick={() => {
+                      if (provider === p) return
                       setProvider(p)
                       // The OpenAI gateway override is scoped per provider: when
                       // switching away and back to openai, restore the persisted
                       // openai override only if openai is the active provider,
-                      // never the reused ollama base URL.
+                      // never the reused ollama base URL. Clicking the
+                      // already-active tab keeps unsaved edits.
                       setOpenaiBaseUrlInput(
                         p === 'openai' ? (status?.provider === 'openai' ? (status.base_url || '') : '') : '',
                       )
                       const def = EMBEDDING_DEFAULT_MODELS[p]
-                      setModelInput(prev => {
-                        if (provider === p) return prev
-                        return EMBEDDING_MODELS[p].some(model => model.value === prev) ? prev : def
-                      })
+                      setModelInput(prev =>
+                        EMBEDDING_MODELS[p].some(model => model.value === prev) ? prev : def,
+                      )
                     }}
                     className={`flex-1 px-1.5 py-1 text-[11px] rounded transition-colors select-none ${
                       provider === p ? 'bg-accent text-accent-text font-medium shadow-sm' : 'text-muted hover:text-text'
