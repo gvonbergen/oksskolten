@@ -110,17 +110,32 @@ describe('PATCH /api/settings/search-embedding', () => {
     expect(mockRequestRebuild).not.toHaveBeenCalled()
   })
 
-  it('rejects enabling when the openai credential is missing', async () => {
-    seedPrerequisite()
+  it('rejects enabling when no OpenAI credential exists (reuse supplies none)', async () => {
+    // Ollama summary provider meets the prerequisite without api_key.openai,
+    // so this isolates the embedding credential guard: with neither the
+    // reused api_key.openai nor a legacy embedding.api_key, enabling fails.
+    upsertSetting('summary.auto', 'on')
+    upsertSetting('summary.provider', 'ollama')
+    upsertSetting('summary.model', 'llama3.2:latest')
     const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { enabled: 'on', provider: 'openai', model: 'text-embedding-3-small' }, headers: json })
     expect(res.statusCode).toBe(400)
     expect(res.json().error).toMatch(/API key is required/)
     expect(mockRequestRebuild).not.toHaveBeenCalled()
   })
 
+  it('enables openai embeddings by reusing api_key.openai — no separate embedding key needed', async () => {
+    seedPrerequisite()
+    // No embedding.api_key at all: api_key.openai from the LLM provider
+    // section is the single source of truth for the credential.
+    const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { enabled: 'on', provider: 'openai', model: 'text-embedding-3-small', dimensions: 1536 }, headers: json })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().enabled).toBe('on')
+    expect(res.json().api_key_configured).toBe(true)
+    expect(mockRequestRebuild).toHaveBeenCalledTimes(1)
+  })
+
   it('enables embeddings when the prerequisite is met and rebuilds the index (no duplicate rebuilds)', async () => {
     seedPrerequisite()
-    upsertSetting('embedding.api_key', 'sk-embedding')
     const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { enabled: 'on', provider: 'openai', model: 'text-embedding-3-small', dimensions: 1536 }, headers: json })
     expect(res.statusCode).toBe(200)
     expect(res.json().enabled).toBe('on')
@@ -179,11 +194,16 @@ describe('PATCH /api/settings/search-embedding', () => {
     res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'openai', base_url: 'http://example.com/v1' }, headers: json })
     expect(res.statusCode).toBe(400)
 
+    // Ollama no longer accepts a separate embedding base URL: it reuses
+    // ollama.base_url from the LLM provider section.
     res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'ollama', base_url: 'http://localhost:11434' }, headers: json })
-    expect(res.statusCode).toBe(200)
-
-    res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { base_url: 'https://192.168.1.1' }, headers: json })
     expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/AI Providers|base URL/i)
+
+    // Operator LAN endpoints are usable for the OpenAI gateway override.
+    res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { provider: 'openai', base_url: 'https://192.168.1.1' }, headers: json })
+    expect(res.statusCode).toBe(200)
+    expect(getSetting('embedding.base_url')).toBe('https://192.168.1.1')
   })
 
   it('validates a retained base URL when switching providers', async () => {
@@ -207,8 +227,17 @@ describe('POST /api/settings/search-embedding/key', () => {
     await app.close()
   })
 
+  // The legacy per-embedding credential is only effective when the reused
+  // api_key.openai is absent, so these tests seed a prerequisite that does
+  // not depend on the OpenAI key.
+  function seedPrerequisiteWithoutOpenaiKey() {
+    upsertSetting('summary.auto', 'on')
+    upsertSetting('summary.provider', 'ollama')
+    upsertSetting('summary.model', 'llama3.2:latest')
+  }
+
   it('stores the credential and never returns it afterwards', async () => {
-    seedPrerequisite()
+    seedPrerequisiteWithoutOpenaiKey()
     upsertSetting('embedding.enabled', 'on')
     upsertSetting('embedding.provider', 'openai')
     upsertSetting('embedding.model', 'text-embedding-3-small')
@@ -224,8 +253,22 @@ describe('POST /api/settings/search-embedding/key', () => {
     expect(res.json().api_key_configured).toBe(true)
   })
 
+  it('does not change the embedder when the reused OpenAI provider key already supplies the credential', async () => {
+    seedPrerequisite() // sets api_key.openai — the effective credential
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+
+    const res = await app.inject({ method: 'POST', url: '/api/settings/search-embedding/key', payload: { apiKey: 'sk-legacy-override' }, headers: json })
+    expect(res.statusCode).toBe(200)
+    // Stored, but ignored while api_key.openai exists — the effective
+    // credential is unchanged, so the embedder does not need re-syncing.
+    expect(getSetting('embedding.api_key')).toBe('sk-legacy-override')
+    expect(mockRequestRebuild).not.toHaveBeenCalled()
+  })
+
   it('deletes the credential on empty key', async () => {
-    seedPrerequisite()
+    seedPrerequisiteWithoutOpenaiKey()
     upsertSetting('embedding.enabled', 'on')
     upsertSetting('embedding.provider', 'openai')
     upsertSetting('embedding.model', 'text-embedding-3-small')
@@ -238,7 +281,7 @@ describe('POST /api/settings/search-embedding/key', () => {
   })
 
   it('rebuilds when an existing credential is replaced', async () => {
-    seedPrerequisite()
+    seedPrerequisiteWithoutOpenaiKey()
     upsertSetting('embedding.enabled', 'on')
     upsertSetting('embedding.provider', 'openai')
     upsertSetting('embedding.model', 'text-embedding-3-small')

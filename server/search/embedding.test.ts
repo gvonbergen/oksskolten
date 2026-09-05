@@ -89,6 +89,49 @@ describe('embedding config compiler', () => {
     expect(buildEmbeddersSettings(config)).toBeNull()
   })
 
+  it('ollama embeddings reuse the Ollama LLM provider connection settings', () => {
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'ollama')
+    upsertSetting('embedding.model', 'nomic-embed-text')
+    upsertSetting('ollama.base_url', 'http://10.8.0.1:11434')
+    upsertSetting('ollama.custom_headers', JSON.stringify({ authorization: 'Bearer tenant-token' }))
+
+    const config = getEmbeddingConfig()
+    expect(config.baseUrl).toBe('http://10.8.0.1:11434')
+    expect(config.apiKey).toBeNull()
+    expect(config.customHeaders).toEqual({ authorization: 'Bearer tenant-token' })
+  })
+
+  it('ollama embeddings ignore a legacy per-embedding base URL and fall back to the Ollama default', () => {
+    upsertSetting('embedding.provider', 'ollama')
+    upsertSetting('embedding.model', 'nomic-embed-text')
+    upsertSetting('embedding.base_url', 'http://stale-legacy-value:11434')
+
+    const config = getEmbeddingConfig()
+    expect(config.baseUrl).toBe('http://localhost:11434')
+  })
+
+  it('openai embeddings reuse api_key.openai and honor the legacy embedding key only as a fallback', () => {
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('api_key.openai', 'sk-reused-provider-key')
+    upsertSetting('embedding.api_key', 'sk-legacy-embedding-key')
+    expect(getEmbeddingConfig().apiKey).toBe('sk-reused-provider-key')
+
+    deleteSetting('api_key.openai')
+    expect(getEmbeddingConfig().apiKey).toBe('sk-legacy-embedding-key')
+
+    deleteSetting('embedding.api_key')
+    expect(getEmbeddingConfig().apiKey).toBeNull()
+  })
+
+  it('openai embeddings keep embedding.base_url as the gateway override (no LLM-side base URL exists)', () => {
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.base_url', 'https://openrouter.ai/api/v1')
+    expect(getEmbeddingConfig().baseUrl).toBe('https://openrouter.ai/api/v1')
+  })
+
   it('never exposes the secret in status payloads', () => {
     upsertSetting('embedding.enabled', 'on')
     upsertSetting('embedding.provider', 'openai')
@@ -244,9 +287,22 @@ describe('applyEmbeddingVectors', () => {
     upsertSetting('embedding.enabled', 'on')
     upsertSetting('embedding.provider', 'openai')
     upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-x')
     deleteSetting('embedding.api_key')
+    // The reused OpenAI provider key also supplies the embedding credential.
+    deleteSetting('api_key.openai')
     const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: 'S' })
     expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: null })
+  })
+
+  it('marks writes as embedded when the credential is reused from the OpenAI provider settings', () => {
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    // No embedding.api_key at all — api_key.openai is the single source of truth.
+    upsertSetting('api_key.openai', 'sk-reused')
+    const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: 'S' })
+    expect(doc._vectors).toBeUndefined()
   })
 })
 
@@ -353,10 +409,34 @@ describe('testEmbeddingConnection', () => {
     expect(requests[0].headers).not.toHaveProperty('authorization')
   })
 
-  it('refuses a probe to a private address over HTTP', async () => {
-    const result = await testEmbeddingConnection(openaiConfig({ baseUrl: 'http://10.0.0.5:8080/v1', apiKey: null }))
+  it('reuses the Ollama provider custom headers on the probe', async () => {
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ embeddings: [new Array(768).fill(0.1)] }))
+    }
+    await testEmbeddingConnection({
+      enabled: true,
+      provider: 'ollama',
+      model: 'nomic-embed-text',
+      dimensions: null,
+      baseUrl,
+      apiKey: null,
+      customHeaders: { 'x-auth': 'token-123' },
+    })
+    expect(requests[0].headers['x-auth']).toBe('token-123')
+    expect(requests[0].headers['content-type']).toBe('application/json')
+  })
+
+  it('refuses a probe to a link-local metadata address over HTTP', async () => {
+    const result = await testEmbeddingConnection(openaiConfig({ baseUrl: 'http://169.254.169.254/v1', apiKey: null }))
     expect(result.ok).toBe(false)
-    expect(result.error).toMatch(/loopback/i)
+    expect(result.error).toMatch(/link-local|reserved|loopback/i)
+  })
+
+  it('refuses a probe to the CGNAT shared range', async () => {
+    const result = await testEmbeddingConnection(openaiConfig({ baseUrl: 'http://100.64.1.1/v1', apiKey: null }))
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/link-local|reserved|loopback/i)
   })
 
   it('requires provider and model', async () => {

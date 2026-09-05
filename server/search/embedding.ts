@@ -8,6 +8,7 @@ import {
 } from '../../shared/models.js'
 import { getEmbeddingProxyUrl } from './proxy-config.js'
 import { safeEmbeddingRequest } from './endpoint-safety.js'
+import { getOllamaCustomHeaders } from '../providers/llm/ollama.js'
 
 /**
  * Embedding-assisted search configuration.
@@ -53,7 +54,18 @@ export const EMBEDDING_SETTING_ENABLED = 'embedding.enabled'
 export const EMBEDDING_SETTING_PROVIDER = 'embedding.provider'
 export const EMBEDDING_SETTING_MODEL = 'embedding.model'
 export const EMBEDDING_SETTING_DIMENSIONS = 'embedding.dimensions'
+/**
+ * OpenAI-only optional override for OpenAI-compatible gateways (e.g.
+ * OpenRouter). The Ollama provider does not use this key: its endpoint is
+ * reused from the LLM provider settings (`ollama.base_url`), the single
+ * source of truth for that provider's connection.
+ */
 export const EMBEDDING_SETTING_BASE_URL = 'embedding.base_url'
+/**
+ * Legacy per-embedding credential (PR 1). Embeddings now reuse
+ * `api_key.openai` from the LLM provider section; a stored value here is
+ * only honored as a fallback when no OpenAI provider key exists.
+ */
 export const EMBEDDING_SETTING_API_KEY = 'embedding.api_key'
 
 // --- Config ---
@@ -66,6 +78,41 @@ export interface EmbeddingConfig {
   baseUrl: string | null
   /** Secret. Never serialize this outside the server process. */
   apiKey: string | null
+  /** Custom headers reused from the Ollama LLM provider settings. Internal only. */
+  customHeaders?: Record<string, string>
+}
+
+/**
+ * Resolve the connection settings an embedding provider reuses from the
+ * existing LLM provider configuration (one source of truth per provider):
+ * - `ollama` reuses `ollama.base_url` (with the same env/default fallback
+ *   chain as the Ollama LLM provider) plus `ollama.custom_headers`.
+ * - `openai` reuses `api_key.openai`; a legacy `embedding.api_key` is
+ *   honored only as a fallback. There is no LLM-side OpenAI base URL, so
+ *   `embedding.base_url` remains the optional gateway override.
+ */
+export interface EmbeddingConnection {
+  baseUrl: string | null
+  apiKey: string | null
+  customHeaders: Record<string, string>
+}
+
+export function resolveEmbeddingConnection(
+  provider: EmbeddingProvider,
+  readSetting: (key: string) => string | null | undefined = getSetting,
+): EmbeddingConnection {
+  if (provider === 'ollama') {
+    return {
+      baseUrl: readSetting('ollama.base_url') || process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
+      apiKey: null,
+      customHeaders: getOllamaCustomHeaders(),
+    }
+  }
+  return {
+    baseUrl: readSetting(EMBEDDING_SETTING_BASE_URL) || null,
+    apiKey: readSetting('api_key.openai') || readSetting(EMBEDDING_SETTING_API_KEY) || null,
+    customHeaders: {},
+  }
 }
 
 export function getEmbeddingConfig(): EmbeddingConfig {
@@ -77,13 +124,15 @@ export function getEmbeddingConfig(): EmbeddingConfig {
   const dimensionsNum = Number(dimensionsRaw)
   const dimensions =
     dimensionsRaw && Number.isFinite(dimensionsNum) && dimensionsNum >= 1 ? Math.floor(dimensionsNum) : null
+  const connection = provider ? resolveEmbeddingConnection(provider) : { baseUrl: null, apiKey: null, customHeaders: {} }
   return {
     enabled: getSetting(EMBEDDING_SETTING_ENABLED) === 'on',
     provider,
     model: getSetting(EMBEDDING_SETTING_MODEL) || null,
     dimensions,
-    baseUrl: getSetting(EMBEDDING_SETTING_BASE_URL) || (provider === 'ollama' ? process.env.OLLAMA_BASE_URL || null : null),
-    apiKey: getSetting(EMBEDDING_SETTING_API_KEY) || null,
+    baseUrl: connection.baseUrl,
+    apiKey: connection.apiKey,
+    customHeaders: connection.customHeaders,
   }
 }
 
@@ -329,7 +378,10 @@ export async function testEmbeddingConnection(config: EmbeddingConfig): Promise<
     return { ok: false, error: 'Provider and model are required' }
   }
   const probe = 'oksskolten embedding connectivity probe'
-  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  const headers: Record<string, string> = {
+    ...config.customHeaders,
+    'content-type': 'application/json',
+  }
 
   try {
     let url: string

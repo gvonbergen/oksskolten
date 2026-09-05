@@ -62,20 +62,23 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
     return () => clearTimeout(timer)
   }, [mutate, settings.summaryAuto, settings.summaryProvider, settings.summaryModel])
 
-  // Local form state (initialized from server once)
+  // Local form state (initialized from server once). The provider base URL
+  // and API key are NOT configured here: Ollama reuses ollama.base_url /
+  // ollama.custom_headers and OpenAI reuses api_key.openai from the LLM
+  // provider section (AI Providers). The only local input is the OpenAI
+  // gateway override (embedding.base_url) — there is no LLM-side OpenAI
+  // base URL to reuse.
   const [provider, setProvider] = useState<EmbeddingProvider | null>(null)
   const [modelInput, setModelInput] = useState('')
   const [dimensionsInput, setDimensionsInput] = useState('')
-  const [baseUrlInput, setBaseUrlInput] = useState('')
-  const [apiKeyInput, setApiKeyInput] = useState('')
+  const [openaiBaseUrlInput, setOpenaiBaseUrlInput] = useState('')
   const [initialized, setInitialized] = useState(false)
   useEffect(() => {
     if (!status || initialized) return
     setProvider(status.provider)
     setModelInput(status.model || '')
     setDimensionsInput(status.dimensions ? String(status.dimensions) : '')
-    setBaseUrlInput(status.base_url || '')
-    setApiKeyInput('')
+    setOpenaiBaseUrlInput(status.base_url || '')
     setInitialized(true)
   }, [status, initialized])
 
@@ -99,9 +102,9 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
       provider !== status.provider ||
       modelInput !== (status.model || '') ||
       dims !== status.dimensions ||
-      baseUrlInput !== (status.base_url || '')
+      (provider === 'openai' && openaiBaseUrlInput !== (status.base_url || ''))
     )
-  }, [status, provider, modelInput, dimensionsInput, baseUrlInput])
+  }, [status, provider, modelInput, dimensionsInput, openaiBaseUrlInput])
 
   const handleEnable = useCallback(async (value: 'on' | 'off') => {
     if (saving) return
@@ -124,12 +127,15 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
     setMessage(null)
     setTestResult(null)
     try {
-      await apiPatch('/api/settings/search-embedding', {
+      // base_url is only sent for OpenAI (gateway override); Ollama reuses
+      // the LLM provider's base URL and must not carry a duplicate here.
+      const body: Record<string, unknown> = {
         provider: provider ?? '',
         model: modelInput,
         dimensions: dimensionsInput,
-        base_url: baseUrlInput,
-      })
+      }
+      if (provider === 'openai') body.base_url = openaiBaseUrlInput
+      await apiPatch('/api/settings/search-embedding', body)
       void mutate()
       showMessage(t('settings.semanticSaved'), 'success')
     } catch (err: unknown) {
@@ -137,49 +143,20 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
     } finally {
       setSaving(false)
     }
-  }, [saving, provider, modelInput, dimensionsInput, baseUrlInput, mutate, t])
-
-  const handleSaveKey = useCallback(async () => {
-    if (saving) return
-    setSaving(true)
-    try {
-      await apiPost('/api/settings/search-embedding/key', { apiKey: apiKeyInput })
-      setApiKeyInput('')
-      setMessage(null)
-      void mutate()
-      showMessage(t('settings.semanticApiKeySaved'), 'success')
-    } catch (err: unknown) {
-      showMessage(err instanceof Error ? err.message : 'Save failed', 'error')
-    } finally {
-      setSaving(false)
-    }
-  }, [saving, apiKeyInput, mutate, t])
-
-  const handleDeleteKey = useCallback(async () => {
-    if (saving) return
-    setSaving(true)
-    try {
-      await apiPost('/api/settings/search-embedding/key', { apiKey: '' })
-      void mutate()
-      showMessage(t('settings.semanticApiKeyDeleted'), 'success')
-    } catch (err: unknown) {
-      showMessage(err instanceof Error ? err.message : 'Save failed', 'error')
-    } finally {
-      setSaving(false)
-    }
-  }, [saving, mutate, t])
+  }, [saving, provider, modelInput, dimensionsInput, openaiBaseUrlInput, mutate, t])
 
   const handleTest = useCallback(async () => {
     if (testing) return
     setTesting(true)
     setTestResult(null)
     try {
+      // The effective credential/base URL live on the server (reused from
+      // the LLM provider section); only local form values are echoed back.
       const body: Record<string, unknown> = {}
       if (provider) body.provider = provider
       if (modelInput) body.model = modelInput
       if (dimensionsInput) body.dimensions = Number(dimensionsInput)
-      if (baseUrlInput) body.base_url = baseUrlInput
-      if (apiKeyInput) body.apiKey = apiKeyInput
+      if (provider === 'openai' && openaiBaseUrlInput) body.base_url = openaiBaseUrlInput
       const res = await apiPost('/api/settings/search-embedding/test', body) as { ok: boolean; model?: string; dimensions?: number }
       setTestResult({ ok: true, text: t('settings.semanticTestOk', { model: res.model || '', dimensions: String(res.dimensions ?? '') }) })
     } catch (err: unknown) {
@@ -188,7 +165,7 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
     } finally {
       setTesting(false)
     }
-  }, [testing, provider, modelInput, dimensionsInput, baseUrlInput, apiKeyInput, t])
+  }, [testing, provider, modelInput, dimensionsInput, openaiBaseUrlInput, t])
 
   const handleRebuild = useCallback(async () => {
     setRebuildConfirm(false)
@@ -208,7 +185,8 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
   const lastError = status?.last_rebuild && status.last_rebuild.ok === false ? status.last_rebuild.error : null
   const rebuildProgress = lastRebuildProgress(status?.last_rebuild)
 
-  const privacyUrl = provider === 'ollama' ? (baseUrlInput || OLLAMA_DEFAULT_URL) : ''
+  const privacyUrl = provider === 'ollama' ? (status?.base_url || OLLAMA_DEFAULT_URL) : ''
+  const openaiKeyConfigured = !!status?.api_key_configured
 
   return (
     <section className="space-y-4">
@@ -240,7 +218,7 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
               key={opt}
               type="button"
               onClick={() => handleEnable(opt)}
-              disabled={saving || rebuilding || (opt === 'on' && (prerequisiteUnmet || apiKeyMissingForOpenai(status, provider, apiKeyInput)))}
+              disabled={saving || rebuilding || (opt === 'on' && (prerequisiteUnmet || (provider === 'openai' && !openaiKeyConfigured)))}
               aria-pressed={enabled === (opt === 'on')}
               className={`px-3 py-1.5 text-xs rounded transition-colors select-none disabled:opacity-40 ${
                 enabled === (opt === 'on')
@@ -343,55 +321,36 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
             </FormField>
 
             <FormField label={t('settings.semanticBaseUrl')} hint={t('settings.semanticBaseUrlDesc')} compact>
-              <Input
-                type="text"
-                value={baseUrlInput}
-                onChange={e => setBaseUrlInput(e.target.value)}
-                placeholder={provider === 'openai' ? 'https://api.openai.com/v1' : OLLAMA_DEFAULT_URL}
-                className="py-1.5"
-              />
+              {provider === 'openai' ? (
+                <Input
+                  type="text"
+                  value={openaiBaseUrlInput}
+                  onChange={e => setOpenaiBaseUrlInput(e.target.value)}
+                  placeholder="https://api.openai.com/v1"
+                  className="py-1.5"
+                />
+              ) : (
+                /* Reused from the Ollama LLM provider — shown, not edited here */
+                <div>
+                  <div className="px-2.5 py-1.5 text-xs rounded-lg bg-bg-subtle border border-border text-text font-mono select-none">
+                    {status?.base_url || OLLAMA_DEFAULT_URL}
+                  </div>
+                  <p className="text-[11px] text-muted/80 mt-1">{t('settings.semanticBaseUrlReused')}</p>
+                </div>
+              )}
             </FormField>
 
-            {/* Distinct embedding credential (never returned by the server) */}
-            <div className="pt-1 border-t border-border">
-              <FormField label={t('settings.semanticApiKey')} compact>
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="password"
-                    value={apiKeyInput}
-                    onChange={e => setApiKeyInput(e.target.value)}
-                    placeholder={status?.api_key_configured ? '••••••••' : provider === 'openai' ? 'sk-...' : '...'}
-                    className="flex-1 py-1.5"
-                  />
-                  {apiKeyInput && (
-                    <button
-                      type="button"
-                      onClick={handleSaveKey}
-                      disabled={saving || rebuilding}
-                      className="px-3 py-1.5 text-xs font-medium rounded-lg bg-accent text-accent-text hover:opacity-90 transition-opacity disabled:opacity-50 select-none shrink-0"
-                    >
-                      {t('settings.semanticSave')}
-                    </button>
-                  )}
-                  {status?.api_key_configured && (
-                    <span className="text-xs text-success whitespace-nowrap select-none">{t('settings.semanticApiKeyConfigured')}</span>
-                  )}
-                  {status?.api_key_configured && !apiKeyInput && (
-                    <button
-                      type="button"
-                      onClick={handleDeleteKey}
-                      disabled={saving || rebuilding}
-                      className="px-3 py-1.5 text-xs rounded-lg border border-border text-muted hover:text-text hover:bg-hover transition-colors disabled:opacity-50 select-none shrink-0"
-                    >
-                      {t('settings.semanticApiKeyDelete')}
-                    </button>
-                  )}
+            {/* Credential is reused from the LLM provider section — no second key input */}
+            {provider === 'openai' && (
+              <div className="pt-1 border-t border-border">
+                <div className={`flex items-start gap-2 rounded-md px-3 py-2 text-xs border ${openaiKeyConfigured ? 'bg-bg-subtle border-border text-muted' : 'bg-bg-card border-border text-warning'}`}>
+                  {openaiKeyConfigured
+                    ? <ShieldCheck size={14} className="shrink-0 mt-0.5 text-success" />
+                    : <ShieldAlert size={14} className="shrink-0 mt-0.5 text-warning" />}
+                  <span>{openaiKeyConfigured ? t('settings.semanticApiKeyReused') : t('settings.semanticApiKeyReuseMissing')}</span>
                 </div>
-              </FormField>
-              {provider === 'openai' && !status?.api_key_configured && (
-                <p className="text-[11px] text-muted/80 mt-1">{t('settings.semanticOpenaiKeyRequired')}</p>
-              )}
-            </div>
+              </div>
+            )}
 
             <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-border">
               {hasChanges && (
@@ -476,8 +435,4 @@ function lastRebuildProgress(lastRebuild: EmbeddingStatus['last_rebuild'] | unde
     processed: String(lastRebuild.processedDocuments ?? 0),
     total: String(lastRebuild.totalDocuments),
   }
-}
-
-function apiKeyMissingForOpenai(status: EmbeddingStatus | undefined, provider: EmbeddingProvider | null, apiKeyInput: string): boolean {
-  return provider === 'openai' && !status?.api_key_configured && !apiKeyInput
 }

@@ -16,6 +16,7 @@ import {
   getEmbeddingConfig,
   getEmbeddingPrerequisite,
   getSemanticStatus,
+  resolveEmbeddingConnection,
   testEmbeddingConnection,
   type EmbeddingConfig,
   type EmbeddingProvider,
@@ -115,7 +116,19 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
           ? null
           : body.dimensions
       const storedBaseUrl = getSetting(EMBEDDING_SETTING_BASE_URL) || null
-      const nextBaseUrl = body.base_url === undefined ? storedBaseUrl : body.base_url.trim() || null
+      const providedBaseUrl = body.base_url === undefined ? undefined : body.base_url.trim() || null
+      // base_url is an OpenAI-only override for OpenAI-compatible gateways.
+      // Ollama embeddings reuse the base URL (and custom headers) already
+      // configured for the Ollama LLM provider — the single source of truth
+      // for that provider's connection. A stale stored value is cleaned up
+      // when the Ollama provider is selected.
+      if (nextProvider === 'ollama' && providedBaseUrl != null) {
+        reply.status(400).send({
+          error: 'Ollama embeddings reuse the base URL configured for the Ollama provider in Settings > AI Providers; a separate embedding base URL is not used',
+        })
+        return
+      }
+      const nextBaseUrl = nextProvider === 'ollama' ? null : (providedBaseUrl === undefined ? storedBaseUrl : providedBaseUrl)
       if (nextBaseUrl !== null) {
         if (!nextProvider) {
           reply.status(400).send({ error: 'Select a provider before configuring base_url' })
@@ -156,8 +169,8 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
           reply.status(400).send({ error: 'Select an embedding model' })
           return
         }
-        if (nextProvider === 'openai' && !getSetting(EMBEDDING_SETTING_API_KEY)) {
-          reply.status(400).send({ error: 'An OpenAI embedding API key is required before enabling semantic search' })
+        if (nextProvider === 'openai' && !resolveEmbeddingConnection('openai').apiKey) {
+          reply.status(400).send({ error: 'An OpenAI API key is required before enabling semantic search; add it in Settings > AI Providers (OpenAI)' })
           return
         }
       }
@@ -228,12 +241,16 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
         reply.status(409).send({ error: 'An index rebuild is already in progress; retry this credential change when it finishes' })
         return
       }
+      // The embedder only changes when the EFFECTIVE credential changes:
+      // api_key.openai (reused from the LLM provider section) wins over the
+      // legacy embedding.api_key fallback stored here.
+      const effectiveKeyBefore = getEmbeddingConfig().apiKey
       if (key === '') {
         deleteSetting(EMBEDDING_SETTING_API_KEY)
       } else {
         upsertSetting(EMBEDDING_SETTING_API_KEY, key)
       }
-      if (getEmbeddingConfig().enabled && key !== previousKey) {
+      if (getEmbeddingConfig().enabled && getEmbeddingConfig().apiKey !== effectiveKeyBefore) {
         // Keep the persisted Meilisearch embedder in sync with the managed
         // configuration (secrets change the embedder settings object).
         requestSearchRebuild()

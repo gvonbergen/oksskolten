@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { getEmbeddingConfig } from '../search/embedding.js'
+import { getOllamaCustomHeaders } from '../providers/llm/ollama.js'
 import { isEmbeddingProxyAuthorized } from '../search/proxy-config.js'
 import { safeEmbeddingRequest, PROXY_FORWARD_TIMEOUT_MS } from '../search/endpoint-safety.js'
 
@@ -37,7 +38,12 @@ export async function embeddingProxyRoutes(api: FastifyInstance): Promise<void> 
     }
 
     const body = typeof request.body === 'string' ? request.body : JSON.stringify(request.body ?? {})
-    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    const headers: Record<string, string> = {
+      // Ollama embeddings reuse the custom headers configured for the Ollama
+      // LLM provider (ollama.custom_headers); content-type is never overridden.
+      ...getOllamaCustomHeaders(),
+      'content-type': 'application/json',
+    }
     if (config.provider === 'openai' && config.apiKey) {
       headers.authorization = `Bearer ${config.apiKey}`
     }

@@ -65,7 +65,7 @@ describe('embedding proxy rate limiting', () => {
 describe('embedding proxy endpoint forwarding', () => {
   let app: FastifyInstance
   let upstream: http.Server
-  const received: Array<{ url: string | undefined; body: string }> = []
+  const received: Array<{ url: string | undefined; body: string; headers: http.IncomingHttpHeaders } > = []
 
   beforeEach(() => {
     setupTestDb()
@@ -84,7 +84,7 @@ describe('embedding proxy endpoint forwarding', () => {
       const chunks: Buffer[] = []
       req.on('data', c => chunks.push(c))
       req.on('end', () => {
-        received.push({ url: req.url, body: Buffer.concat(chunks).toString('utf8') })
+        received.push({ url: req.url, body: Buffer.concat(chunks).toString('utf8'), headers: req.headers })
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ embeddings: [new Array(768).fill(0.1)] }))
       })
@@ -95,7 +95,10 @@ describe('embedding proxy endpoint forwarding', () => {
     upsertSetting('embedding.enabled', 'on')
     upsertSetting('embedding.provider', 'ollama')
     upsertSetting('embedding.model', 'nomic-embed-text')
-    upsertSetting('embedding.base_url', `http://127.0.0.1:${port}`)
+    // Reused from the Ollama LLM provider — embedding.base_url is not used
+    // for ollama anymore.
+    upsertSetting('ollama.base_url', `http://127.0.0.1:${port}`)
+    upsertSetting('ollama.custom_headers', JSON.stringify({ 'x-tenant': 'acme' }))
 
     const instance = Fastify()
     await instance.register(embeddingProxyRoutes)
@@ -117,6 +120,10 @@ describe('embedding proxy endpoint forwarding', () => {
     expect(received[0].url).toBe('/api/embed')
     const sent = JSON.parse(received[0].body) as { model: string; input: string[] }
     expect(sent.model).toBe('nomic-embed-text')
+    // Custom headers configured for the Ollama LLM provider are reused;
+    // content-type is never overridden by them.
+    expect(received[0].headers['x-tenant']).toBe('acme')
+    expect(received[0].headers['content-type']).toBe('application/json')
     expect(JSON.parse(res.body)).toEqual({ embeddings: [new Array(768).fill(0.1)] })
   })
 
