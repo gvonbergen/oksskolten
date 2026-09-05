@@ -1,8 +1,13 @@
-import { describe, it, expect, afterAll } from 'vitest'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { describe, it, expect, afterAll, beforeEach, afterEach } from 'vitest'
 import Fastify, { type FastifyInstance } from 'fastify'
 import rateLimit from '@fastify/rate-limit'
 import { embeddingProxyRoutes } from './embedding-proxy.js'
 import { isRateLimitExempt } from '../rate-limit.js'
+import { setupTestDb } from '../__tests__/helpers/testDb.js'
+import { upsertSetting } from '../db.js'
+import { getEmbeddingProxyToken } from '../search/proxy-config.js'
 
 const apps: FastifyInstance[] = []
 
@@ -54,5 +59,79 @@ describe('embedding proxy rate limiting', () => {
     }
     expect(statuses.filter(code => code === 200)).toHaveLength(3)
     expect(statuses.filter(code => code === 429)).toHaveLength(2)
+  })
+})
+
+describe('embedding proxy endpoint forwarding', () => {
+  let app: FastifyInstance
+  let upstream: http.Server
+  let baseUrl: string
+  const received: Array<{ url: string | undefined; body: string }> = []
+
+  beforeEach(() => {
+    setupTestDb()
+    received.length = 0
+  })
+
+  afterEach(async () => {
+    await Promise.all([
+      app?.close(),
+      new Promise<void>(resolve => upstream?.close(() => resolve())),
+    ])
+  })
+
+  async function buildOllamaApp(): Promise<FastifyInstance> {
+    upstream = http.createServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', c => chunks.push(c))
+      req.on('end', () => {
+        received.push({ url: req.url, body: Buffer.concat(chunks).toString('utf8') })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ embeddings: [new Array(768).fill(0.1)] }))
+      })
+    })
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+    const port = (upstream.address() as AddressInfo).port
+
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'ollama')
+    upsertSetting('embedding.model', 'nomic-embed-text')
+    upsertSetting('embedding.base_url', `http://127.0.0.1:${port}`)
+
+    const instance = Fastify()
+    await instance.register(embeddingProxyRoutes)
+    return instance
+  }
+
+  it('forwards Ollama embedder requests to the Ollama /api/embed endpoint', async () => {
+    app = await buildOllamaApp()
+    const token = getEmbeddingProxyToken()
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/internal/embedding-proxy/${encodeURIComponent(token)}/api/embed`,
+      payload: { model: 'nomic-embed-text', input: ['hello'] },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(received).toHaveLength(1)
+    // The Ollama native embedding endpoint is /api/embed — not the
+    // OpenAI-style /embeddings and not /api/embeddings.
+    expect(received[0].url).toBe('/api/embed')
+    const sent = JSON.parse(received[0].body) as { model: string; input: string[] }
+    expect(sent.model).toBe('nomic-embed-text')
+    expect(JSON.parse(res.body)).toEqual({ embeddings: [new Array(768).fill(0.1)] })
+  })
+
+  it('rejects OpenAI-style proxy paths for the Ollama provider', async () => {
+    app = await buildOllamaApp()
+    const token = getEmbeddingProxyToken()
+    for (const path of ['embeddings', 'api/embeddings']) {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/internal/embedding-proxy/${encodeURIComponent(token)}/${path}`,
+        payload: { model: 'nomic-embed-text', input: ['hello'] },
+      })
+      expect(res.statusCode).toBe(404)
+    }
+    expect(received).toHaveLength(0)
   })
 })
