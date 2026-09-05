@@ -2986,3 +2986,106 @@ describe('fetchAllFeeds — retry backoff', () => {
     expect(row.last_error).toBeTruthy()
   })
 })
+
+// ==========================================================================
+// Automatic summarization of new articles
+// ==========================================================================
+
+describe('auto summarization of new articles', () => {
+  let fetchAllFeeds: typeof import('./fetcher.js').fetchAllFeeds
+
+  beforeEach(async () => {
+    const mod = await import('./fetcher.js')
+    fetchAllFeeds = mod.fetchAllFeeds
+  })
+
+  it('generates a summary for a new article when summary.auto is ON', async () => {
+    const feed = seedFeed()
+    const rssXml = rss20Xml('Test', [{ title: 'Auto', link: 'https://example.com/auto', pubDate: '2024-01-02T00:00:00Z' }])
+    const html = articleHtml()
+
+    upsertSetting('summary.auto', 'on')
+    mockMessagesCreate.mockResolvedValue({
+      content: [{ type: 'text', text: 'Auto-generated summary text' }],
+      usage: { input_tokens: 100, output_tokens: 50 },
+    })
+
+    mockFetch.mockImplementation((url: string | URL) => {
+      const u = url.toString()
+      if (u === feed.rss_url) return Promise.resolve(mockResponse(rssXml, { headers: { 'content-type': 'application/rss+xml' } }))
+      if (u === 'https://example.com/auto') return Promise.resolve(mockResponse(html))
+      return Promise.resolve(mockResponse('', { status: 404 }))
+    })
+
+    await fetchAllFeeds()
+
+    // Summmarization is fire-and-forget; wait for the article to get it.
+    const { getDb } = await import('./db.js')
+    await vi.waitFor(() => {
+      const row = getDb().prepare('SELECT summary FROM articles WHERE url = ?').get('https://example.com/auto') as { summary: string | null }
+      expect(row.summary).toBe('Auto-generated summary text')
+    })
+    expect(mockMessagesCreate).toHaveBeenCalled()
+  })
+
+  it('does not summarize new articles when summary.auto is OFF (default)', async () => {
+    const feed = seedFeed()
+    const rssXml = rss20Xml('Test', [{ title: 'No Auto', link: 'https://example.com/no-auto' }])
+    const html = articleHtml()
+
+    // summary.auto is NOT set — default off
+    mockMessagesCreate.mockResolvedValue({
+      content: [{ type: 'text', text: 'should not be used' }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    })
+
+    mockFetch.mockImplementation((url: string | URL) => {
+      const u = url.toString()
+      if (u === feed.rss_url) return Promise.resolve(mockResponse(rssXml, { headers: { 'content-type': 'application/rss+xml' } }))
+      if (u === 'https://example.com/no-auto') return Promise.resolve(mockResponse(html))
+      return Promise.resolve(mockResponse('', { status: 404 }))
+    })
+
+    await fetchAllFeeds()
+
+    const { getDb } = await import('./db.js')
+    const row = getDb().prepare('SELECT summary FROM articles WHERE url = ?').get('https://example.com/no-auto') as { summary: string | null }
+    expect(row.summary).toBeNull()
+    expect(mockMessagesCreate).not.toHaveBeenCalled()
+  })
+
+  it('summarizes a retried article once its full text arrives', async () => {
+    const feed = seedFeed()
+    insertArticle({
+      feed_id: feed.id,
+      title: 'Was Missing Text',
+      url: 'https://example.com/retry-sum',
+      published_at: '2024-01-01T00:00:00Z',
+      last_error: 'fetchFullText: failed',
+      lang: 'en',
+    })
+    const rssXml = rss20Xml('Test', [{ title: 'Was Missing Text', link: 'https://example.com/retry-sum' }])
+    const html = articleHtml()
+
+    upsertSetting('summary.auto', 'on')
+    mockMessagesCreate.mockResolvedValue({
+      content: [{ type: 'text', text: 'Retry summary' }],
+      usage: { input_tokens: 50, output_tokens: 20 },
+    })
+
+    mockFetch.mockImplementation((url: string | URL) => {
+      const u = url.toString()
+      if (u === feed.rss_url) return Promise.resolve(mockResponse(rssXml, { headers: { 'content-type': 'application/rss+xml' } }))
+      if (u === 'https://example.com/retry-sum') return Promise.resolve(mockResponse(html))
+      return Promise.resolve(mockResponse('', { status: 404 }))
+    })
+
+    await fetchAllFeeds()
+
+    const { getDb } = await import('./db.js')
+    await vi.waitFor(() => {
+      const row = getDb().prepare('SELECT summary FROM articles WHERE url = ?').get('https://example.com/retry-sum') as { summary: string | null }
+      expect(row.summary).toBe('Retry summary')
+    })
+  })
+})

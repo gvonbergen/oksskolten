@@ -4,7 +4,13 @@ import { vi } from 'vitest'
 // Without this, safeFetch → assertSafeUrl → dns.lookup() performs real DNS
 // queries whose latency varies by environment, causing flaky timeouts.
 vi.mock('node:dns/promises', () => ({
-  lookup: vi.fn().mockResolvedValue({ address: '93.184.216.34', family: 4 }),
+  // Mirror the real lookup contract: `all: true` resolves to an array of
+  // LookupAddress entries, otherwise a single entry.
+  lookup: vi.fn().mockImplementation((_hostname: string, options?: { all?: boolean }) =>
+    options?.all
+      ? Promise.resolve([{ address: '93.184.216.34', family: 4 }])
+      : Promise.resolve({ address: '93.184.216.34', family: 4 }),
+  ),
 }))
 
 // Global Piscina mock for all server tests.

@@ -17,7 +17,8 @@
     "lint": "eslint src/ server/ shared/",
     "typecheck": "tsc --noEmit",
     "test": "mise exec node@22 -- vitest run",
-    "test:watch": "mise exec node@22 -- vitest"
+    "test:watch": "mise exec node@22 -- vitest",
+    "smoke:embedding": "npx tsx scripts/smoke-embedding.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
@@ -104,5 +105,11 @@
     "vite": "^6.1.0",
     "vite-plugin-pwa": "^1.2.0",
     "vitest": "^4.0.18"
+  },
+  "allowScripts": {
+    "esbuild@0.27.4": true,
+    "esbuild@0.25.12": true,
+    "protobufjs@7.5.4": true,
+    "sharp@0.33.5": true
   }
 }

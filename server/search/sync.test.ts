@@ -10,8 +10,11 @@ const mockAddDocuments = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockUpdateSettings = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockGetStats = vi.fn()
 const mockGetIndexes = vi.fn()
+const mockGetSettings = vi.fn()
 const mockCreateIndex = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockDeleteIndex = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
+const mockDeleteDocument = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
+const mockDeleteDocuments = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockSwapIndexes = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 vi.mock('./client.js', () => ({
   getSearchClient: () => ({
@@ -21,6 +24,9 @@ vi.mock('./client.js', () => ({
       addDocuments: mockAddDocuments,
       updateSettings: mockUpdateSettings,
       getStats: mockGetStats,
+      getSettings: mockGetSettings,
+      deleteDocument: mockDeleteDocument,
+      deleteDocuments: mockDeleteDocuments,
     }),
     createIndex: mockCreateIndex,
     deleteIndex: mockDeleteIndex,
@@ -30,7 +36,8 @@ vi.mock('./client.js', () => ({
   ARTICLES_STAGING_INDEX: 'articles_staging',
 }))
 
-import { ensureSearchIndex, isSearchReady, syncAllScoredArticlesToSearch, _setRebuilding, _setSearchReady } from './sync.js'
+import { ensureSearchIndex, isSearchReady, isSemanticReady, isRebuilding, rebuildSearchIndex, requestSearchRebuild, syncAllScoredArticlesToSearch, syncArticleFiltersToSearch, syncArticlesByFeedToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, _setSwapRetryDelay, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
+import { upsertSetting, deleteSetting } from '../db.js'
 
 function seedFeed(): number {
   return getDb().prepare(
@@ -138,6 +145,64 @@ describe('syncAllScoredArticlesToSearch', () => {
   })
 })
 
+describe('article sync embedding policy', () => {
+  beforeEach(() => {
+    setupTestDb()
+    _setRebuilding(false)
+    mockAddDocuments.mockClear()
+  })
+
+  it('adds the null vector marker when a bulk-synced article has no summary', () => {
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-embedding')
+    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn().mockResolvedValue(undefined) })
+
+    syncArticlesByFeedToSearch([{
+      id: 1,
+      feed_id: 1,
+      category_id: null,
+      title: 'Article',
+      summary: null,
+      full_text: 'Body',
+      full_text_translated: '',
+      lang: 'en',
+      published_at: 1,
+      score: 0,
+      is_unread: true,
+      is_liked: false,
+      is_bookmarked: false,
+    }])
+
+    expect(mockAddDocuments.mock.calls[0][0][0]._vectors).toEqual({ 'article-v1': null })
+  })
+
+  it('marks live-index writes as opt-outs during a disabled rebuild', () => {
+    upsertSetting('embedding.enabled', 'off')
+    _setRebuilding(true)
+    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn().mockResolvedValue(undefined) })
+
+    syncArticlesByFeedToSearch([{
+      id: 1,
+      feed_id: 1,
+      category_id: null,
+      title: 'Article',
+      summary: 'Summary',
+      full_text: 'Body',
+      full_text_translated: '',
+      lang: 'en',
+      published_at: 1,
+      score: 0,
+      is_unread: true,
+      is_liked: false,
+      is_bookmarked: false,
+    }])
+
+    expect(mockAddDocuments.mock.calls[0][0][0]._vectors).toEqual({ 'article-v1': null })
+  })
+})
+
 describe('ensureSearchIndex', () => {
   beforeEach(() => {
     setupTestDb()
@@ -222,6 +287,36 @@ describe('ensureSearchIndex', () => {
     expect(isSearchReady()).toBe(false)
   })
 
+  it('degrades to keyword-only search when the settings task fails deterministically', async () => {
+    // An invalid embedder configuration (e.g. unsupported dimensions for the
+    // model) makes the settings task fail on every retry. The production
+    // keyword index is intact, so startup must keep search available instead
+    // of throwing into the retry loop and 503-ing all search.
+    upsertSetting('summary.auto', 'on')
+    upsertSetting('summary.provider', 'openai')
+    upsertSetting('summary.model', 'gpt-4.1-mini')
+    upsertSetting('api_key.openai', 'sk-summary')
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.dimensions', '8192')
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockGetStats.mockResolvedValue({ numberOfDocuments: 42 })
+    mockWaitTask.mockResolvedValueOnce({ status: 'failed', error: { message: 'invalid dimensions' } })
+
+    await ensureSearchIndex()
+
+    expect(isSearchReady()).toBe(true)
+    expect(isSemanticReady()).toBe(false)
+    // Heavy rebuild operations must not cascade from the failed settings task.
+    expect(mockCreateIndex).not.toHaveBeenCalled()
+    expect(mockSwapIndexes).not.toHaveBeenCalled()
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild?.ok).toBe(false)
+    expect(runtime.lastRebuild?.error).toContain('production settings update failed')
+    expect(runtime.lastRebuild?.error).toContain('invalid dimensions')
+  })
+
   it('throws when the fallthrough rebuild fails so the startup retry loop can back off', async () => {
     // No indexes exist, so ensureSearchIndex must fall through to rebuild.
     // Make rebuildSearchIndex hit a hard failure that its internal catch
@@ -232,5 +327,493 @@ describe('ensureSearchIndex', () => {
 
     await expect(ensureSearchIndex()).rejects.toThrow(/rebuild/i)
     expect(isSearchReady()).toBe(false)
+  })
+})
+
+describe('embedder lifecycle — regression for #117 (rebuild must not lose the embedder)', () => {
+  beforeEach(() => {
+    setupTestDb()
+    mockGetIndexes.mockReset()
+    mockGetStats.mockReset()
+    mockGetSettings.mockReset()
+    mockGetSettings.mockResolvedValue({
+      embedders: {
+        'article-v1': { source: 'openAi', model: 'text-embedding-3-small', dimensions: 1536, documentTemplate: '{{doc.title}}\n\n{{doc.summary}}', apiKey: 'sk-live-copy' },
+      },
+    })
+    mockCreateIndex.mockClear()
+    mockDeleteIndex.mockClear()
+    mockAddDocuments.mockClear()
+    mockSwapIndexes.mockClear()
+    mockUpdateSettings.mockClear()
+    mockUpdateDocuments.mockClear()
+    mockWaitTask.mockClear()
+    _setRebuilding(false)
+    _setSearchReady(false)
+    _setLiveEmbedderVerified(false)
+    _resetRebuildRecord()
+    _setSwapRetryDelay(1)
+  })
+
+  function seedEmbeddingSettings() {
+    // The embedding runtime requires automatic summarization to be
+    // configured and enabled (enforced by the settings API too).
+    upsertSetting('summary.auto', 'on')
+    upsertSetting('summary.provider', 'openai')
+    upsertSetting('summary.model', 'gpt-4.1-mini')
+    upsertSetting('api_key.openai', 'sk-summary')
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.dimensions', '1536')
+    upsertSetting('embedding.api_key', 'sk-embedding-test')
+  }
+
+  it('resolveIndexSettings includes the managed embedder when enabled and stays keyword-only when disabled', () => {
+    seedEmbeddingSettings()
+    const settings = resolveIndexSettings() as Record<string, unknown>
+    expect(settings.embedders).toBeDefined()
+    const embedders = settings.embedders as Record<string, unknown>
+    expect(Object.keys(embedders)).toEqual(['article-v1'])
+
+    upsertSetting('embedding.enabled', 'off')
+    const disabled = resolveIndexSettings() as Record<string, unknown>
+    expect(disabled.embedders).toBeUndefined()
+  })
+
+  it('rebuild applies the embedder to the new staging index before documents — no embedder is lost after create/swap/delete', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    const summarized = seedArticle(feedId, { url: 'https://example.com/summarized' })
+    seedArticle(feedId, { url: 'https://example.com/plain' })
+    getDb().prepare('UPDATE articles SET summary = ? WHERE id = ?').run('A short summary.', summarized)
+
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }, { uid: 'articles_staging' }] })
+
+    await rebuildSearchIndex()
+
+    // Staging settings carried the embedder (the #117 regression path)
+    const stagingSettings = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>
+    expect(stagingSettings.embedders).toBeDefined()
+    expect((stagingSettings.embedders as Record<string, unknown>)['article-v1']).toMatchObject({
+      source: 'openAi',
+      model: 'text-embedding-3-small',
+    })
+
+    // Documents carry summary and _vectors markers: summarized docs are
+    // embedded from the template, un-summarized docs are explicitly skipped.
+    const docs = mockAddDocuments.mock.calls[0][0] as Record<string, unknown>[]
+    expect(docs).toHaveLength(2)
+    const byUrl = Object.fromEntries(docs.map(d => [d.id, d]))
+    const summarizedDoc = byUrl[summarized]
+    expect(summarizedDoc.summary).toBe('A short summary.')
+    expect(summarizedDoc._vectors).toBeUndefined()
+    const plainDoc = docs.find(d => d.id !== summarized)!
+    expect(plainDoc._vectors).toEqual({ 'article-v1': null })
+
+    expect(isSearchReady()).toBe(true)
+    expect(isSemanticReady()).toBe(true)
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild).toMatchObject({ processedDocuments: 2, totalDocuments: 2, documents: 2 })
+  })
+
+  it('startup reconciliation re-applies the embedder to an already-populated production index', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    for (let i = 0; i < 7; i++) seedArticle(feedId, { url: `https://example.com/startup-${i}` })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockGetStats.mockResolvedValue({ numberOfDocuments: 7 })
+    mockGetSettings.mockResolvedValue({
+      embedders: {
+        'article-v1': { source: 'openAi', model: 'text-embedding-3-small', dimensions: 1536, documentTemplate: '{{doc.title}}\n\n{{doc.summary}}', apiKey: 'sk-live-copy' },
+      },
+    })
+
+    await ensureSearchIndex()
+
+    const applied = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>
+    expect(applied.embedders).toBeDefined()
+    expect(isSearchReady()).toBe(true)
+    // The live index carries the expected embedder (secrets stripped in the comparison)
+    expect(isSemanticReady()).toBe(true)
+  })
+
+  it('startup reconciliation clears a stale embedder when embeddings are disabled', async () => {
+    seedEmbeddingSettings()
+    upsertSetting('embedding.enabled', 'off')
+    const feedId = seedFeed()
+    for (let i = 0; i < 7; i++) seedArticle(feedId, { url: `https://example.com/disabled-${i}` })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockGetStats.mockResolvedValue({ numberOfDocuments: 7 })
+
+    await ensureSearchIndex()
+
+    expect(mockUpdateSettings.mock.calls[0][0]).toMatchObject({ embedders: {} })
+    expect(isSemanticReady()).toBe(false)
+  })
+
+  it('semantic readiness stays false when the live index lacks the expected embedder', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    for (let i = 0; i < 7; i++) seedArticle(feedId, { url: `https://example.com/missing-${i}` })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockGetStats.mockResolvedValue({ numberOfDocuments: 7 })
+    mockGetSettings.mockResolvedValue({ embedders: null })
+
+    await ensureSearchIndex()
+
+    expect(isSearchReady()).toBe(true)
+    expect(isSemanticReady()).toBe(false)
+  })
+
+  it('a failed document batch task aborts before the swap and records the error', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/bad' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockAddDocuments.mockReturnValueOnce({
+      waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'Embedding generation failed: sk-embedding-test' } }),
+    })
+
+    await rebuildSearchIndex()
+
+    expect(mockSwapIndexes).not.toHaveBeenCalled()
+    expect(isSearchReady()).toBe(false)
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild?.ok).toBe(false)
+    expect(runtime.lastRebuild?.error).toContain('Embedding generation failed')
+    expect(runtime.lastRebuild?.error).not.toContain('sk-embedding-test')
+  })
+
+  it('a failed staging settings task aborts before the swap and records the error', async () => {
+    // waitForTask resolves (does not throw) on a failed task, e.g. an invalid
+    // embedder model/dimensions combination, so the rebuild must check the
+    // task status and abort before promoting the embedderless staging index.
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/settings-fail' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockUpdateSettings.mockReturnValueOnce({
+      waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'Invalid embedder configuration: model `nope`' } }),
+    })
+
+    await rebuildSearchIndex()
+
+    expect(mockSwapIndexes).not.toHaveBeenCalled()
+    expect(mockAddDocuments).not.toHaveBeenCalled()
+    expect(isSearchReady()).toBe(false)
+    expect(isSemanticReady()).toBe(false)
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild?.ok).toBe(false)
+    expect(runtime.lastRebuild?.error).toContain('Invalid embedder configuration')
+  })
+
+  it('a failed swap task is treated as indeterminate and reconciliation reruns safely', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/swap-timeout' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    // The swap is accepted but waiting for it times out; the enqueued swap
+    // may still complete later, so the rebuild must not report success and
+    // must schedule a reconciliation rerun instead of discarding state.
+    mockSwapIndexes.mockReturnValueOnce({
+      waitTask: vi.fn().mockRejectedValue(new Error('MeiliSearchTaskTimeOutError: timeout')),
+    })
+
+    await rebuildSearchIndex()
+
+    expect(isSearchReady()).toBe(false)
+    // The rebuild treats the timed-out swap as indeterminate and schedules a
+    // bounded automatic retry.
+    await vi.waitFor(() => expect(mockSwapIndexes).toHaveBeenCalledTimes(2))
+
+    // The reconciliation rerun completes the rebuild safely.
+    await vi.waitFor(() => expect(isRebuilding()).toBe(false))
+    expect(isSearchReady()).toBe(true)
+    const recovered = await getSearchIndexRuntime()
+    expect(recovered.lastRebuild?.ok).toBe(true)
+  })
+
+  it("preserves reconciliation when the retry rebuild's own swap determinately fails", async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    const articleId = seedArticle(feedId, { url: 'https://example.com/second-failure' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask, catch: vi.fn() }))
+    _setSwapRetryDelay(40)
+    // Rebuild A: swap accepted but the wait times out — indeterminate.
+    mockSwapIndexes.mockImplementationOnce(() => ({
+      waitTask: vi.fn().mockRejectedValue(new Error('MeiliSearchTaskTimeOutError: timeout')),
+    }))
+    // Rebuild B (the armed retry): its own swap task determinately FAILS
+    // after A's swap already committed FIFO — production now holds A's
+    // stale snapshot.
+    let swapCall = 0
+    mockSwapIndexes.mockImplementation(() => {
+      swapCall++
+      if (swapCall === 1) {
+        return { waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'swap rejected' } }) }
+      }
+      return { waitTask: mockWaitTask }
+    })
+
+    await rebuildSearchIndex()
+    syncArticleFiltersToSearch([{ id: articleId, is_liked: true }])
+
+    // The chain must keep going (retry C) until the change log is replayed
+    // and the index converges, instead of silently dropping everything.
+    await vi.waitFor(() => expect(mockSwapIndexes.mock.calls.length).toBeGreaterThanOrEqual(3))
+    await vi.waitFor(() => expect(isRebuilding()).toBe(false))
+    expect(isSearchReady()).toBe(true)
+    const recovered = await getSearchIndexRuntime()
+    expect(recovered.lastRebuild?.ok).toBe(true)
+    const replayed = mockUpdateDocuments.mock.calls[mockUpdateDocuments.mock.calls.length - 1][0] as Record<string, unknown>[]
+    expect(replayed).toEqual([{ id: articleId, is_liked: true }])
+    mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask }))
+  })
+
+  it('a post-swap failure after a committed swap does not arm indeterminate-swap retries', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/post-swap' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    _setSearchReady(true)
+    _setSwapRetryDelay(10)
+    // The swap determinately commits, then the staging cleanup task fails.
+    mockDeleteIndex.mockImplementationOnce(() => ({
+      waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'staging busy' } }),
+    }))
+
+    await rebuildSearchIndex()
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    // The promoted snapshot is complete and already live: no automatic full
+    // rebuild retries may run for a determinate post-swap failure.
+    expect(mockSwapIndexes).toHaveBeenCalledTimes(1)
+    expect(mockAddDocuments).toHaveBeenCalledTimes(1)
+    expect(isRebuilding()).toBe(false)
+    expect(isSearchReady()).toBe(true)
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild?.ok).toBe(false)
+    expect(runtime.lastRebuild?.error).toContain('staging index cleanup failed')
+  })
+
+  it('a determinately failed swap task is not retried as indeterminate', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/swap-failed' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    _setSearchReady(true)
+    mockSwapIndexes.mockReturnValueOnce({
+      waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'swap rejected' } }),
+    })
+
+    await rebuildSearchIndex()
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    // A failed swapIndexes task is atomic and never committed, so the
+    // indeterminate-swap retry chain (full rebuild + re-embedding) must not
+    // run for it.
+    expect(mockSwapIndexes).toHaveBeenCalledTimes(1)
+    expect(mockAddDocuments).toHaveBeenCalledTimes(1)
+    expect(isRebuilding()).toBe(false)
+    // The previous production index is intact and stays usable.
+    expect(isSearchReady()).toBe(true)
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild?.ok).toBe(false)
+    expect(runtime.lastRebuild?.error).toContain('staging swap failed')
+  })
+
+  it('an indeterminate-swap retry replays mutations captured while pending', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    const articleId = seedArticle(feedId, { url: 'https://example.com/liked-while-pending' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    // The sync helpers fire-and-forget (.catch), so the mock must return a
+    // thenable-ish object for the capture path to complete.
+    mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask, catch: vi.fn() }))
+    _setSwapRetryDelay(50)
+    mockSwapIndexes.mockReturnValueOnce({
+      waitTask: vi.fn().mockRejectedValue(new Error('MeiliSearchTaskTimeOutError: timeout')),
+    })
+
+    await rebuildSearchIndex()
+
+    // The retry is pending and still capturing: like the article now.
+    syncArticleFiltersToSearch([{ id: articleId, is_liked: true }])
+
+    // The retry rebuild promotes the new snapshot and replays the captured
+    // mutation onto production.
+    await vi.waitFor(() => expect(mockUpdateDocuments.mock.calls.length).toBeGreaterThanOrEqual(2))
+    const replayed = mockUpdateDocuments.mock.calls[1][0] as Record<string, unknown>[]
+    expect(replayed).toEqual([{ id: articleId, is_liked: true }])
+    const recovered = await getSearchIndexRuntime()
+    expect(recovered.lastRebuild?.ok).toBe(true)
+    mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask }))
+  })
+
+  it('a superseding rebuild failing determinately still re-arms the reconciliation retry', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    const articleId = seedArticle(feedId, { url: 'https://example.com/superseded' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask, catch: vi.fn() }))
+    _setSwapRetryDelay(40)
+    // Rebuild A: swap accepted but the wait times out — indeterminate, retry armed.
+    mockSwapIndexes.mockImplementationOnce(() => ({
+      waitTask: vi.fn().mockRejectedValue(new Error('MeiliSearchTaskTimeOutError: timeout')),
+    }))
+
+    await rebuildSearchIndex()
+
+    // Captured while the retry is pending.
+    syncArticleFiltersToSearch([{ id: articleId, is_liked: true }])
+
+    // Rebuild B (e.g. the 6-hour cron) starts before the retry fires and
+    // fails determinately before its own swap (transient Meilisearch outage).
+    mockGetIndexes.mockRejectedValueOnce(new Error('meili down'))
+    requestSearchRebuild()
+    await vi.waitFor(() => expect(isRebuilding()).toBe(false))
+
+    // The bounded retry must still fire, replay the carried change log, and
+    // converge the index instead of silently dropping the chain.
+    await vi.waitFor(() => expect(mockSwapIndexes.mock.calls.length).toBeGreaterThanOrEqual(2))
+    await vi.waitFor(() => expect(isRebuilding()).toBe(false))
+    expect(isSearchReady()).toBe(true)
+    const recovered = await getSearchIndexRuntime()
+    expect(recovered.lastRebuild?.ok).toBe(true)
+    const replayed = mockUpdateDocuments.mock.calls[mockUpdateDocuments.mock.calls.length - 1][0] as Record<string, unknown>[]
+    expect(replayed).toEqual([{ id: articleId, is_liked: true }])
+    mockUpdateDocuments.mockImplementation(() => ({ waitTask: mockWaitTask }))
+  })
+
+  it('stops after three automatic indeterminate-swap retries and requires a manual rebuild', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/swap-stuck' })
+    mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
+    mockSwapIndexes.mockImplementation(() => ({
+      waitTask: vi.fn().mockRejectedValue(new Error('MeiliSearchTaskTimeOutError: timeout')),
+    }))
+    mockGetStats.mockResolvedValue({ numberOfDocuments: 5 })
+    mockGetSettings.mockResolvedValue({ embedders: null })
+
+    await rebuildSearchIndex()
+
+    // Initial attempt + exactly three automatic retries, then the loop stops.
+    await vi.waitFor(() => expect(mockSwapIndexes).toHaveBeenCalledTimes(4))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(mockSwapIndexes).toHaveBeenCalledTimes(4)
+    expect(isRebuilding()).toBe(false)
+
+    // Bounded re-index/embedding cost: one document batch per attempt.
+    expect(mockAddDocuments).toHaveBeenCalledTimes(4)
+
+    // Keyword search stays available on the live index; semantic does not.
+    expect(isSearchReady()).toBe(true)
+    expect(isSemanticReady()).toBe(false)
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.lastRebuild?.ok).toBe(false)
+    expect(runtime.lastRebuild?.error).toMatch(/manual rebuild/i)
+
+    // A manual rebuild resets the retry budget and succeeds.
+    mockSwapIndexes.mockImplementation(() => ({ waitTask: mockWaitTask }))
+    await rebuildSearchIndex()
+    expect(isSearchReady()).toBe(true)
+    const after = await getSearchIndexRuntime()
+    expect(after.lastRebuild?.ok).toBe(true)
+  })
+
+  it('disabling embeddings rebuilds without an embedder and drops semantic readiness', async () => {
+    seedEmbeddingSettings()
+    const feedId = seedFeed()
+    seedArticle(feedId, { url: 'https://example.com/a' })
+    mockGetIndexes.mockResolvedValue({ results: [] })
+
+    await rebuildSearchIndex()
+    expect(isSemanticReady()).toBe(true)
+
+    upsertSetting('embedding.enabled', 'off')
+    _setLiveEmbedderVerified(false)
+    mockAddDocuments.mockClear()
+
+    // Second (keyword-only) rebuild
+    await rebuildSearchIndex()
+    const settings = mockUpdateSettings.mock.calls[1][0] as Record<string, unknown>
+    expect(settings.embedders).toBeUndefined()
+    const docs = mockAddDocuments.mock.calls[0][0] as Record<string, unknown>[]
+    expect(docs[0]._vectors).toEqual({ 'article-v1': null })
+    expect(isSemanticReady()).toBe(false)
+  })
+
+  it('does not start duplicate concurrent rebuilds', async () => {
+    mockGetIndexes.mockResolvedValue({ results: [] })
+    const first = rebuildSearchIndex()
+    const second = rebuildSearchIndex()
+    await Promise.all([first, second])
+    expect(mockGetIndexes).toHaveBeenCalledTimes(1)
+  })
+
+  it('getSearchIndexRuntime reports stats from Meilisearch with semantic readiness', async () => {
+    seedEmbeddingSettings()
+    _setSearchReady(true)
+    _setLiveEmbedderVerified(true)
+    mockGetStats.mockResolvedValue({
+      numberOfDocuments: 10,
+      numberOfEmbeddedDocuments: 8,
+      numberOfEmbeddings: 8,
+    })
+
+    const runtime = await getSearchIndexRuntime()
+    expect(runtime.semanticReady).toBe(true)
+    expect(runtime.index?.documents).toBe(10)
+    expect(runtime.index?.embeddedDocuments).toBe(8)
+    expect(runtime.index?.embeddings).toBe(8)
+  })
+})
+
+describe('semantic readiness reacts to prerequisite changes at runtime', () => {
+  beforeEach(() => {
+    setupTestDb()
+    _resetRebuildRecord()
+    _setSearchReady(true)
+    _setLiveEmbedderVerified(true)
+  })
+
+  it('drops hybrid readiness when automatic summarization is disabled later', () => {
+    upsertSetting('summary.auto', 'on')
+    upsertSetting('summary.provider', 'openai')
+    upsertSetting('summary.model', 'gpt-4.1-mini')
+    upsertSetting('api_key.openai', 'sk-sum')
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-embed')
+
+    expect(isSemanticReady()).toBe(true)
+
+    // Automatic summarization switched off — embeddings must stop operating
+    // (keyword-only) even though the toggle is still on.
+    deleteSetting('summary.auto')
+    expect(isSemanticReady()).toBe(false)
+
+    // Re-enabling the prerequisite requires a fresh coverage rebuild.
+    upsertSetting('summary.auto', 'on')
+    expect(isSemanticReady()).toBe(false)
+  })
+
+  it('stays keyword-only when the provider credential is removed', () => {
+    upsertSetting('summary.auto', 'on')
+    upsertSetting('summary.provider', 'openai')
+    upsertSetting('summary.model', 'gpt-4.1-mini')
+    upsertSetting('api_key.openai', 'sk-sum')
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-embed')
+
+    expect(isSemanticReady()).toBe(true)
+    deleteSetting('embedding.api_key')
+    expect(isSemanticReady()).toBe(false)
   })
 })

@@ -31,6 +31,8 @@ interface TaskConfig {
   maxTokensValue?: string
   setMaxTokens?: (v: string) => void
   defaultMaxTokens?: number
+  autoValue?: string
+  setAuto?: (v: 'on' | 'off') => void
 }
 
 const SWR_KEY_OPTS = { revalidateOnFocus: false } as const
@@ -98,6 +100,11 @@ export function TaskModelSection({ settings, t }: { settings: Settings; t: TFunc
       maxTokensValue: settings.summaryMaxTokens || '',
       setMaxTokens: settings.setSummaryMaxTokens,
       defaultMaxTokens: 2048,
+      // Automatic summarization for newly ingested articles; semantic
+      // search (embeddings) depends on it being ON with a configured
+      // provider/model.
+      autoValue: settings.summaryAuto || '',
+      setAuto: settings.setSummaryAuto,
     },
     {
       labelKey: 'integration.task.translate',
@@ -181,6 +188,13 @@ function TaskModelRow({ task, t, configuredKeys, hasAnyTranslateKey }: { task: T
         <ProviderButtons providers={LLM_TASK_PROVIDERS} selected={task.providerValue} onSelect={task.setProvider} t={t} configuredKeys={configuredKeys} />
         <ModelSelect provider={task.providerValue} modelValue={task.modelValue} setModel={task.setModel} t={t} />
         {task.setMaxTokens && <MaxTokensInput task={task} t={t} />}
+        {task.setAuto && (
+          <div className="pt-1 border-t border-border">
+            <p className="text-[11px] font-medium text-text mb-1.5 select-none">{t('integration.autoSummary')}</p>
+            <p className="text-[11px] text-muted/80 mb-2 select-none">{t('integration.autoSummaryDesc')}</p>
+            <RadioInline value={task.autoValue === 'on' ? 'on' : 'off'} onChange={task.setAuto} t={t} />
+          </div>
+        )}
       </div>
     )
   }
@@ -263,6 +277,26 @@ function MaxTokensInput({ task, t }: { task: TaskConfig; t: TFunc }) {
 }
 
 /* ── Shared sub-components ── */
+
+function RadioInline({ value, onChange, t }: { value: 'on' | 'off'; onChange: (v: 'on' | 'off') => void; t: TFunc }) {
+  return (
+    <div className="flex rounded-md bg-bg-subtle p-0.5 w-fit">
+      {(['on', 'off'] as const).map(opt => (
+        <button
+          key={opt}
+          type="button"
+          onClick={() => onChange(opt)}
+          aria-pressed={value === opt}
+          className={`px-3 py-1 text-[11px] rounded transition-colors select-none ${
+            value === opt ? 'bg-accent text-accent-text font-medium shadow-sm' : 'text-muted hover:text-text'
+          }`}
+        >
+          {opt === 'on' ? t('settings.semanticEnableOn') : t('settings.semanticEnableOff')}
+        </button>
+      ))}
+    </div>
+  )
+}
 
 function ProviderButtons({ providers, selected, onSelect, t, configuredKeys }: { providers: readonly string[]; selected: string; onSelect: (v: string) => void; t: TFunc; configuredKeys: Record<string, boolean> }) {
   if (providers.length === 0) return null

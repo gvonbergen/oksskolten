@@ -4,8 +4,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 // Hoisted mocks
 // ---------------------------------------------------------------------------
 
-const { mockGetSetting, mockCreateMessage, mockStreamMessage, mockRequireKey } = vi.hoisted(() => ({
+const { mockGetSetting, mockGetArticleById, mockCreateMessage, mockStreamMessage, mockRequireKey } = vi.hoisted(() => ({
   mockGetSetting: vi.fn(),
+  mockGetArticleById: vi.fn(),
   mockCreateMessage: vi.fn(),
   mockStreamMessage: vi.fn(),
   mockRequireKey: vi.fn(),
@@ -13,6 +14,7 @@ const { mockGetSetting, mockCreateMessage, mockStreamMessage, mockRequireKey } =
 
 vi.mock('../db.js', () => ({
   getSetting: (...args: unknown[]) => mockGetSetting(...args),
+  getArticleById: (...args: unknown[]) => mockGetArticleById(...args),
 }))
 
 vi.mock('../providers/llm/index.js', () => ({
@@ -162,6 +164,12 @@ describe('summarizeArticle', () => {
     mockCreateMessage.mockResolvedValue({ text: 'ok', inputTokens: 0, outputTokens: 0 })
     const result = await summarizeArticle('text')
     expect(result.model).toBe('claude-sonnet-4-6')
+  })
+
+  it('does not use the Anthropic default for another selected provider', async () => {
+    mockGetSetting.mockImplementation((key: string) => key === 'summary.provider' ? 'openai' : null)
+    await expect(summarizeArticle('text')).rejects.toThrow('openai model is not configured')
+    expect(mockCreateMessage).not.toHaveBeenCalled()
   })
 
   it('propagates provider errors', async () => {

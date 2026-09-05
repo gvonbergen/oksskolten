@@ -407,9 +407,17 @@ The floor is **not applied** in:
 - `limit`: Optional (default 20, max 50)
 - Returns `503` when the search index is not yet built
 
+When semantic search is configured and healthy (see [86_feature_semantic_search.md](./86_feature_semantic_search.md)),
+searches run as conservative hybrid semantic+keyword retrieval
+(`semanticRatio: 0.25`) over title+summary embeddings with all filters,
+pagination and sorting preserved. The response additionally carries
+`search_mode`: `"keyword"`, `"hybrid"`, or `"keyword-fallback"` (embedding
+generation failed and the request was retried keyword-only — results are
+never emptied by an embedding failure).
+
 ```json
 // Response: 200
-{ "articles": [{ "id": 1, "title": "...", "url": "...", "feed_name": "...", "published_at": "..." }, ...] }
+{ "articles": [{ "id": 1, "title": "...", "url": "...", "feed_name": "...", "published_at": "..." }, ...], "has_more": false, "search_mode": "hybrid" }
 ```
 
 

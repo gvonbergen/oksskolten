@@ -109,7 +109,13 @@ flowchart TD
     FXPFormat -- "RSS 1.0<br/>(RDF)" --> RDF["URL = item.link<br/>?? item.@rdf:about"]
 ```
 
-**Note**: Summarization (Haiku) and translation (Sonnet) are not executed during Cron. They are invoked on-demand when the user opens an article (`POST /api/articles/:id/summarize`, `POST /api/articles/:id/translate`).
+**Note**: Translation (Sonnet) is not executed during Cron; it is invoked on demand when the user opens an article (`POST /api/articles/:id/translate`).
+
+**Automatic summarization**: When the `summary.auto` setting is ON (see [86_feature_semantic_search.md](./86_feature_semantic_search.md)),
+when the `summary.auto` setting is ON and a summary provider/model is configured, newly ingested
+articles with full text are summarized automatically (fire-and-forget, retried articles included).
+On-demand summarization (`POST /api/articles/:id/summarize`) remains available. Automatic summaries
+are also the prerequisite and embedding input for semantic search.
 
 ### Shared Article Fetch Function (`fetchArticleContent`)
 

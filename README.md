@@ -60,6 +60,7 @@ Because Oksskolten always has the complete text, AI summarization and translatio
 - **AI Summarization & Translation** — On-demand article processing via Anthropic, Gemini, or OpenAI with SSE streaming. Works on full article text, not RSS excerpts
 - **Interactive Chat** — Multi-turn AI conversations with MCP tooling; search articles, get stats, and ask questions about your feeds
 - **Full-Text Search** — Meilisearch-powered search across your entire article archive
+- **Semantic Search** — optional embedding-assisted hybrid search (title + summary) via OpenAI or a local Ollama model, with automatic keyword fallback; requires automatic summarization to be enabled and is off by default (see [docs/spec/86_feature_semantic_search.md](docs/spec/86_feature_semantic_search.md))
 - **Smart Fetching** — Adaptive per-feed scheduling, conditional HTTP requests (ETag/Last-Modified), content-hash deduplication, exponential backoff, and tracking parameter removal
 - **PWA** — Offline reading, background sync, and add-to-home-screen support
 - **Multi-Auth** — Password, Passkey (WebAuthn), and GitHub OAuth — each independently configurable

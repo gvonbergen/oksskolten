@@ -88,6 +88,41 @@ export const TASK_DEFAULTS = {
 /** LLM providers that require an API key */
 export const LLM_API_PROVIDERS = ['anthropic', 'gemini', 'openai'] as const
 
+// --- Embedding (semantic search) model metadata ---
+
+export const EMBEDDING_PROVIDERS = ['openai', 'ollama'] as const
+export type EmbeddingProvider = (typeof EMBEDDING_PROVIDERS)[number]
+
+export interface EmbeddingModelDef {
+  value: string
+  label: string
+  dimensions: number
+}
+
+export const EMBEDDING_MODELS: Record<EmbeddingProvider, EmbeddingModelDef[]> = {
+  openai: [
+    { value: 'text-embedding-3-small', label: 'text-embedding-3-small', dimensions: 1536 },
+    { value: 'text-embedding-3-large', label: 'text-embedding-3-large', dimensions: 3072 },
+    { value: 'text-embedding-ada-002', label: 'text-embedding-ada-002', dimensions: 1536 },
+  ],
+  ollama: [
+    { value: 'nomic-embed-text', label: 'nomic-embed-text', dimensions: 768 },
+    { value: 'mxbai-embed-large', label: 'mxbai-embed-large', dimensions: 1024 },
+    { value: 'all-minilm', label: 'all-minilm', dimensions: 384 },
+    { value: 'bge-m3', label: 'bge-m3', dimensions: 1024 },
+  ],
+}
+
+export const EMBEDDING_DEFAULT_MODELS: Record<EmbeddingProvider, string> = {
+  openai: 'text-embedding-3-small',
+  ollama: 'nomic-embed-text',
+}
+
+/** Short display label for an embedding model */
+export function getEmbeddingModelLabel(provider: EmbeddingProvider, model: string): string | undefined {
+  return EMBEDDING_MODELS[provider].find((m) => m.value === model)?.label
+}
+
 /** Translation service providers that require an API key */
 export const TRANSLATE_SERVICE_PROVIDERS = ['google-translate', 'deepl'] as const
 
