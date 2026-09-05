@@ -8,6 +8,7 @@ import {
 } from '../../shared/models.js'
 import { getEmbeddingProxyUrl } from './proxy-config.js'
 import { safeEmbeddingRequest } from './endpoint-safety.js'
+import { getOllamaCustomHeaders } from '../providers/llm/ollama.js'
 
 /**
  * Embedding-assisted search configuration.
@@ -53,7 +54,11 @@ export const EMBEDDING_SETTING_ENABLED = 'embedding.enabled'
 export const EMBEDDING_SETTING_PROVIDER = 'embedding.provider'
 export const EMBEDDING_SETTING_MODEL = 'embedding.model'
 export const EMBEDDING_SETTING_DIMENSIONS = 'embedding.dimensions'
-export const EMBEDDING_SETTING_BASE_URL = 'embedding.base_url'
+/**
+ * Legacy per-embedding credential (PR 1). Embeddings now reuse
+ * `api_key.openai` from the LLM provider section; a stored value here is
+ * only honored as a fallback when no OpenAI provider key exists.
+ */
 export const EMBEDDING_SETTING_API_KEY = 'embedding.api_key'
 
 // --- Config ---
@@ -63,9 +68,50 @@ export interface EmbeddingConfig {
   provider: EmbeddingProvider | null
   model: string | null
   dimensions: number | null
+  /**
+   * Effective endpoint base, derived server-side — never user-editable in
+   * Semantic Search. `ollama`: reused `ollama.base_url` from AI Providers.
+   * `openai`: always null (default OpenAI endpoint).
+   */
   baseUrl: string | null
   /** Secret. Never serialize this outside the server process. */
   apiKey: string | null
+  /** Custom headers reused from the Ollama LLM provider settings. Internal only. */
+  customHeaders?: Record<string, string>
+}
+
+/**
+ * Resolve the connection settings an embedding provider reuses from the
+ * existing LLM provider configuration (one source of truth per provider):
+ * - `ollama` reuses `ollama.base_url` (with the same env/default fallback
+ *   chain as the Ollama LLM provider) plus `ollama.custom_headers`.
+ * - `openai` reuses `api_key.openai`; a legacy `embedding.api_key` is
+ *   honored only as a fallback. There is no LLM-side OpenAI base URL, so
+ *   OpenAI embeddings always use the default `https://api.openai.com/v1`
+ *   endpoint — Semantic Search no longer carries a base-URL setting.
+ */
+export interface EmbeddingConnection {
+  baseUrl: string | null
+  apiKey: string | null
+  customHeaders: Record<string, string>
+}
+
+export function resolveEmbeddingConnection(
+  provider: EmbeddingProvider,
+  readSetting: (key: string) => string | null | undefined = getSetting,
+): EmbeddingConnection {
+  if (provider === 'ollama') {
+    return {
+      baseUrl: readSetting('ollama.base_url') || process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
+      apiKey: null,
+      customHeaders: getOllamaCustomHeaders(),
+    }
+  }
+  return {
+    baseUrl: null,
+    apiKey: readSetting('api_key.openai') || readSetting(EMBEDDING_SETTING_API_KEY) || null,
+    customHeaders: {},
+  }
 }
 
 export function getEmbeddingConfig(): EmbeddingConfig {
@@ -77,13 +123,15 @@ export function getEmbeddingConfig(): EmbeddingConfig {
   const dimensionsNum = Number(dimensionsRaw)
   const dimensions =
     dimensionsRaw && Number.isFinite(dimensionsNum) && dimensionsNum >= 1 ? Math.floor(dimensionsNum) : null
+  const connection = provider ? resolveEmbeddingConnection(provider) : { baseUrl: null, apiKey: null, customHeaders: {} }
   return {
     enabled: getSetting(EMBEDDING_SETTING_ENABLED) === 'on',
     provider,
     model: getSetting(EMBEDDING_SETTING_MODEL) || null,
     dimensions,
-    baseUrl: getSetting(EMBEDDING_SETTING_BASE_URL) || (provider === 'ollama' ? process.env.OLLAMA_BASE_URL || null : null),
-    apiKey: getSetting(EMBEDDING_SETTING_API_KEY) || null,
+    baseUrl: connection.baseUrl,
+    apiKey: connection.apiKey,
+    customHeaders: connection.customHeaders,
   }
 }
 
@@ -220,17 +268,26 @@ export function buildEmbeddersSettings(config: EmbeddingConfig): Embedders {
   }
 
   if (config.provider === 'openai') {
+    // No base URL is configured anywhere for OpenAI embeddings: the
+    // endpoint is Meilisearch's default OpenAI endpoint and the credential
+    // is the reused `api_key.openai` / legacy `embedding.api_key`. The
+    // connection settings live in AI Providers, not in Semantic Search.
     return {
       [EMBEDDER_NAME]: {
         source: 'openAi',
         model: config.model,
-        ...(config.baseUrl ? { url: getEmbeddingProxyUrl() } : {}),
         ...(config.apiKey ? { apiKey: config.apiKey } : {}),
         ...shared,
       },
     }
   }
-  return { [EMBEDDER_NAME]: { source: 'ollama', model: config.model, url: getEmbeddingProxyUrl(), ...shared } }
+  // Ollama requests go through the internal tokenized proxy (SSRF-safe
+  // forwarding + `ollama.custom_headers` injection). Meilisearch validates
+  // that an `ollama` embedder URL ends with `/api/embed` or
+  // `/api/embeddings`, so the proxy endpoint (`/<token>/api/embed`, which
+  // the proxy route forwards) is appended to the tokenized base URL.
+  const ollamaProxyUrl = `${getEmbeddingProxyUrl()}/api/embed`
+  return { [EMBEDDER_NAME]: { source: 'ollama', model: config.model, url: ollamaProxyUrl, ...shared } }
 }
 
 /**
@@ -329,11 +386,18 @@ export async function testEmbeddingConnection(config: EmbeddingConfig): Promise<
     return { ok: false, error: 'Provider and model are required' }
   }
   const probe = 'oksskolten embedding connectivity probe'
-  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  const headers: Record<string, string> = {
+    ...config.customHeaders,
+    'content-type': 'application/json',
+  }
 
   try {
     let url: string
     if (config.provider === 'openai') {
+      // A base URL can no longer be configured in Semantic Search; the
+      // `config.baseUrl ||` fallback keeps the function generic for direct
+      // callers (tests) pointing at a local endpoint. Production config
+      // always yields the default OpenAI endpoint.
       const base = (config.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '')
       url = `${base}/embeddings`
       if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`

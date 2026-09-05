@@ -556,22 +556,16 @@ const dict = {
     en: 'Must match the model\'s output dimension; leave empty to use the model default',
     zh: '需与模型的输出维度一致；留空使用模型默认值',
   },
-  'settings.semanticBaseUrl': { ja: 'API ベース URL', en: 'API base URL', zh: 'API 基础 URL'},
-  'settings.semanticBaseUrlDesc': {
-    ja: 'OpenAI は既定で https://api.openai.com/v1。互換エンドポイントの場合はここに指定。Ollama は Ollama サーバーの URL（例: http://host.docker.internal:11434）',
-    en: 'OpenAI defaults to https://api.openai.com/v1 — set this for compatible endpoints. Ollama needs its server URL (e.g. http://host.docker.internal:11434)',
-    zh: 'OpenAI 默认为 https://api.openai.com/v1 — 兼容端点在此指定。Ollama 需要服务器 URL（例如 http://host.docker.internal:11434）',
+  'settings.semanticApiKeyReused': {
+    ja: 'AI プロバイダー（OpenAI）で設定された API キーを再利用します',
+    en: 'Uses the OpenAI API key configured in AI Providers (OpenAI)',
+    zh: '使用 AI 提供商（OpenAI）中配置的 API 密钥',
   },
-  'settings.semanticApiKey': { ja: 'API キー', en: 'API key', zh: 'API 密钥'},
-  'settings.semanticOpenaiKeyRequired': {
-    ja: 'OpenAI の埋め込みには専用の API キーが必要です（チャット用キーは再利用されません）',
-    en: 'A dedicated API key is required for OpenAI embeddings (the chat key is not reused)',
-    zh: 'OpenAI 嵌入需要专用 API 密钥（不会复用聊天密钥）',
+  'settings.semanticApiKeyReuseMissing': {
+    ja: 'OpenAI の API キーが未設定です。AI プロバイダー（OpenAI）で追加してください',
+    en: 'No OpenAI API key found — add one in AI Providers (OpenAI) to enable semantic search',
+    zh: '未找到 OpenAI API 密钥 — 请在 AI 提供商（OpenAI）中添加以启用语义搜索',
   },
-  'settings.semanticApiKeyConfigured': { ja: '設定済み', en: 'Configured', zh: '已配置'},
-  'settings.semanticApiKeySaved': { ja: 'APIキーを保存しました', en: 'API key saved', zh: 'API 密钥已保存'},
-  'settings.semanticApiKeyDeleted': { ja: 'APIキーを削除しました', en: 'API key deleted', zh: 'API 密钥已删除'},
-  'settings.semanticApiKeyDelete': { ja: '削除', en: 'Delete', zh: '删除'},
   'settings.semanticPrivacyCloud': {
     ja: 'プライバシー: 有効にすると、記事のタイトルと要約が埋め込み生成のため ${provider} のクラウド API に送信されます。処理済みのリストアを含む転送先のリテンションポリシーはプロバイダーに依存します',
     en: 'Privacy: when enabled, article titles and summaries will be sent to the ${provider} cloud API for embedding generation. Retention/region policies depend on the provider',

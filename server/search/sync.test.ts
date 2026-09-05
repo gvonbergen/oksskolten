@@ -366,7 +366,7 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     upsertSetting('embedding.provider', 'openai')
     upsertSetting('embedding.model', 'text-embedding-3-small')
     upsertSetting('embedding.dimensions', '1536')
-    upsertSetting('embedding.api_key', 'sk-embedding-test')
+    // The credential is reused from api_key.openai — no per-embedding key.
   }
 
   it('resolveIndexSettings includes the managed embedder when enabled and stays keyword-only when disabled', () => {
@@ -472,7 +472,7 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     seedArticle(feedId, { url: 'https://example.com/bad' })
     mockGetIndexes.mockResolvedValue({ results: [{ uid: 'articles' }] })
     mockAddDocuments.mockReturnValueOnce({
-      waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'Embedding generation failed: sk-embedding-test' } }),
+      waitTask: vi.fn().mockResolvedValue({ status: 'failed', error: { message: 'Embedding generation failed: sk-summary' } }),
     })
 
     await rebuildSearchIndex()
@@ -482,7 +482,8 @@ describe('embedder lifecycle — regression for #117 (rebuild must not lose the 
     const runtime = await getSearchIndexRuntime()
     expect(runtime.lastRebuild?.ok).toBe(false)
     expect(runtime.lastRebuild?.error).toContain('Embedding generation failed')
-    expect(runtime.lastRebuild?.error).not.toContain('sk-embedding-test')
+    // The reused credential (api_key.openai) is redacted from rebuild errors.
+    expect(runtime.lastRebuild?.error).not.toContain('sk-summary')
   })
 
   it('a failed staging settings task aborts before the swap and records the error', async () => {
@@ -813,7 +814,11 @@ describe('semantic readiness reacts to prerequisite changes at runtime', () => {
     upsertSetting('embedding.api_key', 'sk-embed')
 
     expect(isSemanticReady()).toBe(true)
+    // Removing the legacy per-embedding key does not break readiness: the
+    // credential is reused from api_key.openai.
     deleteSetting('embedding.api_key')
+    expect(isSemanticReady()).toBe(true)
+    deleteSetting('api_key.openai')
     expect(isSemanticReady()).toBe(false)
   })
 })

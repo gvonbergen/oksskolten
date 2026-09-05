@@ -11,17 +11,16 @@ import {
   EMBEDDING_SETTING_PROVIDER,
   EMBEDDING_SETTING_MODEL,
   EMBEDDING_SETTING_DIMENSIONS,
-  EMBEDDING_SETTING_BASE_URL,
   EMBEDDING_SETTING_API_KEY,
   getEmbeddingConfig,
   getEmbeddingPrerequisite,
   getSemanticStatus,
+  resolveEmbeddingConnection,
   testEmbeddingConnection,
   type EmbeddingConfig,
   type EmbeddingProvider,
 } from '../search/embedding.js'
 import { getSearchIndexRuntime, isRebuilding, requestSearchRebuild } from '../search/sync.js'
-import { validateEmbeddingEndpoint } from '../search/endpoint-safety.js'
 
 const EmbeddingPatchBody = z.object({
   enabled: z.enum(['on', 'off'], { error: 'enabled must be "on" or "off"' }).optional(),
@@ -33,14 +32,12 @@ const EmbeddingPatchBody = z.object({
       z.literal(''),
     ])
     .optional(),
-  base_url: z.string().max(500).optional(),
 })
 
 const EmbeddingTestBody = z.object({
   provider: z.enum(EMBEDDING_PROVIDERS).optional(),
   model: z.string().max(200).optional(),
   dimensions: z.coerce.number().int().min(1).max(8192).optional(),
-  base_url: z.string().max(500).optional(),
   apiKey: z.string().max(1000).optional(),
 })
 
@@ -114,25 +111,11 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
         : body.dimensions === ''
           ? null
           : body.dimensions
-      const storedBaseUrl = getSetting(EMBEDDING_SETTING_BASE_URL) || null
-      const nextBaseUrl = body.base_url === undefined ? storedBaseUrl : body.base_url.trim() || null
-      if (nextBaseUrl !== null) {
-        if (!nextProvider) {
-          reply.status(400).send({ error: 'Select a provider before configuring base_url' })
-          return
-        }
-        const urlCheck = await validateEmbeddingEndpoint(nextBaseUrl)
-        if (!urlCheck.ok) {
-          reply.status(400).send({ error: urlCheck.error })
-          return
-        }
-      }
       const enabledChanged = body.enabled !== undefined && body.enabled !== (current.enabled ? 'on' : 'off')
       const providerChanged = body.provider !== undefined && body.provider !== current.provider
       const dimensionsChanged = nextDimensions !== current.dimensions
-      const baseUrlChanged = nextBaseUrl !== storedBaseUrl
       const modelWasChanged = modelChanged(body, current)
-      const configChanged = enabledChanged || providerChanged || modelWasChanged || dimensionsChanged || baseUrlChanged
+      const configChanged = enabledChanged || providerChanged || modelWasChanged || dimensionsChanged
 
       if (isRebuilding() && configChanged) {
         reply.status(409).send({ error: 'An index rebuild is already in progress; retry this configuration change when it finishes' })
@@ -156,8 +139,8 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
           reply.status(400).send({ error: 'Select an embedding model' })
           return
         }
-        if (nextProvider === 'openai' && !getSetting(EMBEDDING_SETTING_API_KEY)) {
-          reply.status(400).send({ error: 'An OpenAI embedding API key is required before enabling semantic search' })
+        if (nextProvider === 'openai' && !resolveEmbeddingConnection('openai').apiKey) {
+          reply.status(400).send({ error: 'An OpenAI API key is required before enabling semantic search; add it in Settings > AI Providers (OpenAI)' })
           return
         }
       }
@@ -181,11 +164,12 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
         else upsertSetting(EMBEDDING_SETTING_DIMENSIONS, String(nextDimensions))
         embedderRelevant.push('dimensions')
       }
-      if (baseUrlChanged) {
-        if (nextBaseUrl === null) deleteSetting(EMBEDDING_SETTING_BASE_URL)
-        else upsertSetting(EMBEDDING_SETTING_BASE_URL, nextBaseUrl)
-        embedderRelevant.push('base_url')
-      }
+
+      // Connection settings live only in AI Providers now: a stale
+      // `embedding.base_url` stored before Semantic Search lost its base-URL
+      // setting is cleaned up on the next config update (OpenAI embeddings
+      // always use the default endpoint).
+      deleteSetting('embedding.base_url')
 
       // Embedder-relevant changes are applied to the index through the
       // managed configuration: kick a rebuild (guarded against concurrent
@@ -228,12 +212,16 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
         reply.status(409).send({ error: 'An index rebuild is already in progress; retry this credential change when it finishes' })
         return
       }
+      // The embedder only changes when the EFFECTIVE credential changes:
+      // api_key.openai (reused from the LLM provider section) wins over the
+      // legacy embedding.api_key fallback stored here.
+      const effectiveKeyBefore = getEmbeddingConfig().apiKey
       if (key === '') {
         deleteSetting(EMBEDDING_SETTING_API_KEY)
       } else {
         upsertSetting(EMBEDDING_SETTING_API_KEY, key)
       }
-      if (getEmbeddingConfig().enabled && key !== previousKey) {
+      if (getEmbeddingConfig().enabled && getEmbeddingConfig().apiKey !== effectiveKeyBefore) {
         // Keep the persisted Meilisearch embedder in sync with the managed
         // configuration (secrets change the embedder settings object).
         requestSearchRebuild()
@@ -255,7 +243,6 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
         provider: (body.provider ?? current.provider) as EmbeddingProvider | null,
         model: body.model !== undefined && body.model !== '' ? body.model : current.model,
         dimensions: body.dimensions ?? current.dimensions,
-        baseUrl: body.base_url !== undefined ? (body.base_url || null) : current.baseUrl,
         apiKey: body.apiKey !== undefined ? (body.apiKey || null) : current.apiKey,
       }
       if (!candidate.provider) {
@@ -265,13 +252,6 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
       if (candidate.provider === 'openai' && !candidate.apiKey) {
         reply.status(400).send({ error: 'An API key is required to test the OpenAI embedding provider' })
         return
-      }
-      if (candidate.baseUrl) {
-        const urlCheck = await validateEmbeddingEndpoint(candidate.baseUrl)
-        if (!urlCheck.ok) {
-          reply.status(400).send({ error: urlCheck.error })
-          return
-        }
       }
       const result = await testEmbeddingConnection(candidate)
       if (!result.ok) {

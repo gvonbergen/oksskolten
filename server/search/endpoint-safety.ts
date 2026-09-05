@@ -69,17 +69,42 @@ function isUnsafeAddress(address: string): boolean {
     }
   }
   if (isIP(address) === 4) {
+    // RFC1918 private ranges (10/8, 172.16/12, 192.168/16) are deliberately
+    // NOT listed: the base URL is operator-chosen and authenticated, and a
+    // self-hosted embedder commonly lives on the LAN or a VPN (10.8.0.1,
+    // 192.168.x.x, the Docker bridge gateway). Everything else that makes
+    // no sense as a provider endpoint stays rejected.
     return [
-      ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
-      ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
-      ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24],
+      ['0.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+      ['169.254.0.0', 16], ['192.0.0.0', 24], ['192.0.2.0', 24],
+      ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24],
       ['224.0.0.0', 4], ['240.0.0.0', 4],
     ].some(([network, bits]) => inCidr(address, network as string, bits as number))
   }
+  // IPv6: ULA (fc00::/7) is the private-LAN equivalent of RFC1918 and is
+  // allowed for the same reason; link-local, multicast and documentation
+  // ranges stay rejected.
   return [
-    ['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8], ['2001:db8::', 32],
+    ['::', 128], ['::1', 128], ['fe80::', 10], ['ff00::', 8], ['2001:db8::', 32],
     ['64:ff9b::', 96], ['64:ff9b:1::', 48],
   ].some(([network, bits]) => inCidr(address, network as string, bits as number))
+}
+
+/**
+ * Operator-facing private network targets: RFC1918 for IPv4 and ULA for
+ * IPv6. These are allowed as embedding endpoints (and over plaintext HTTP,
+ * since the traffic never leaves a trusted segment).
+ */
+function isPrivateLanAddress(address: string): boolean {
+  if (isIP(address) === 4) {
+    return inCidr(address, '10.0.0.0', 8) || inCidr(address, '172.16.0.0', 12) || inCidr(address, '192.168.0.0', 16)
+  }
+  if (isIP(address) === 6) return inCidr(address, 'fc00::', 7)
+  return false
+}
+
+function isPrivateLanLiteral(hostname: string): boolean {
+  return (isIP(hostname) === 4 || isIP(hostname) === 6) && isPrivateLanAddress(hostname)
 }
 
 function hostnameOf(url: URL): string {
@@ -96,9 +121,6 @@ async function safeAddresses(url: URL): Promise<string[]> {
   const hostname = hostnameOf(url)
   if (url.username || url.password) throw new Error('base_url must not contain credentials')
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('base_url must use http:// or https://')
-  if (url.protocol === 'http:' && !isLocalEndpoint(hostname)) {
-    throw new Error('HTTP base_url is allowed only for loopback or host.docker.internal')
-  }
   let addresses: string[]
   if (isIP(hostname)) {
     addresses = [hostname]
@@ -106,8 +128,20 @@ async function safeAddresses(url: URL): Promise<string[]> {
     addresses = (await lookup(hostname, { all: true, verbatim: true })).map(result => result.address)
   }
   if (addresses.length === 0) throw new Error('base_url hostname could not be resolved safely')
+  // Loopback metadata services, link-local, multicast and reserved ranges
+  // stay off limits even though the base URL is operator-chosen.
   if (!isLocalEndpoint(hostname) && addresses.some(isUnsafeAddress)) {
-    throw new Error('base_url must not resolve to a private, local, link-local, multicast, or unspecified address')
+    throw new Error('base_url must not resolve to a loopback, link-local, multicast, or reserved address')
+  }
+  // Plaintext HTTP is meaningful only where the traffic never crosses an
+  // untrusted segment: loopback / host.docker.internal, a private LAN
+  // literal (e.g. http://10.8.0.1:11434), or a hostname resolving
+  // exclusively to private LAN addresses. Public hostnames must use HTTPS.
+  const plainHttpAllowed = isLocalEndpoint(hostname) ||
+    isPrivateLanLiteral(hostname) ||
+    (addresses.length > 0 && addresses.every(isPrivateLanAddress))
+  if (url.protocol === 'http:' && !plainHttpAllowed) {
+    throw new Error('HTTP base_url is allowed only for loopback, host.docker.internal, or private LAN addresses')
   }
   return addresses
 }
