@@ -4,6 +4,7 @@ import { googleTranslate } from '../providers/translate/google-translate.js'
 import { deeplTranslate } from '../providers/translate/deepl.js'
 import { TASK_DEFAULTS } from '../../shared/models.js'
 import { getSummaryProviderModel } from '../search/embedding.js'
+import { runWithSummaryConcurrency } from './summary-concurrency.js'
 import { DEFAULT_LANGUAGE, languageName } from '../../shared/lang.js'
 import { logger } from '../logger.js'
 
@@ -62,7 +63,10 @@ export async function autoSummarizeArticle(articleId: number, fullText: string):
     const before = getArticleById(articleId)
     if (!before || before.feed_type === 'clip' || before.summary?.trim()) return false
 
-    const result = await summarizeArticle(fullText)
+    // Ingestion fire-and-forget calls share the configured parallelism
+    // limiter with the backfill job, so at most N summarization requests
+    // ever hit the LLM server at once.
+    const result = await runWithSummaryConcurrency(() => summarizeArticle(fullText))
     if (getSetting('summary.auto') !== 'on') return false
     const latest = getArticleById(articleId)
     if (!latest || latest.feed_type === 'clip' || latest.summary?.trim()) return false

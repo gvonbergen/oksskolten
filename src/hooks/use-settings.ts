@@ -47,6 +47,7 @@ interface Prefs {
   'summary.provider': string | null
   'summary.model': string | null
   'summary.max_tokens': string | null
+  'summary.concurrency': string | null
   'translate.provider': string | null
   'translate.model': string | null
   'translate.max_tokens': string | null
@@ -89,6 +90,7 @@ export function useSettings() {
   const [translateModel, setTranslateModelState] = useState<string | null>(null)
   const [translateTargetLang, setTranslateTargetLangState] = useState<string | null>(null)
   const [summaryMaxTokens, setSummaryMaxTokensState] = useState<string | null>(null)
+  const [summaryConcurrency, setSummaryConcurrencyState] = useState<string | null>(null)
   const [translateMaxTokens, setTranslateMaxTokensState] = useState<string | null>(null)
 
   // --- DB sync ---
@@ -183,6 +185,8 @@ export function useSettings() {
       { key: 'translate.model', setter: setTranslateModelState },
       { key: 'translate.target_lang', setter: setTranslateTargetLangState },
       { key: 'summary.max_tokens', setter: setSummaryMaxTokensState },
+      { key: 'summary.concurrency', setter: setSummaryConcurrencyState,
+        validate: v => { const n = Number(v); return Number.isInteger(n) && n >= 1 && n <= 16 } },
       { key: 'translate.max_tokens', setter: setTranslateMaxTokensState },
     ]
 
@@ -327,6 +331,7 @@ export function useSettings() {
     syncedSetTranslateModel,
     syncedSetTranslateTargetLang,
     syncedSetSummaryMaxTokens,
+    syncedSetSummaryConcurrency,
     syncedSetTranslateMaxTokens,
   } = useMemo(() => {
     const make = <T extends string>(key: keyof Prefs, setter: (v: T) => void) =>
@@ -365,6 +370,7 @@ export function useSettings() {
       syncedSetTranslateModel: make<string>('translate.model', setTranslateModelState),
       syncedSetTranslateTargetLang: make<string>('translate.target_lang', setTranslateTargetLangState),
       syncedSetSummaryMaxTokens: make<string>('summary.max_tokens', setSummaryMaxTokensState),
+      syncedSetSummaryConcurrency: make<string>('summary.concurrency', setSummaryConcurrencyState),
       syncedSetTranslateMaxTokens: make<string>('translate.max_tokens', setTranslateMaxTokensState),
     }
     // scheduleSave and dirtyKeysRef are stable refs; remaining setters are useState/useCallback-stable
@@ -458,6 +464,8 @@ export function useSettings() {
     setTranslateTargetLang: syncedSetTranslateTargetLang,
     summaryMaxTokens,
     setSummaryMaxTokens: syncedSetSummaryMaxTokens,
+    summaryConcurrency,
+    setSummaryConcurrency: syncedSetSummaryConcurrency,
     translateMaxTokens,
     setTranslateMaxTokens: syncedSetTranslateMaxTokens,
     keyboardNavigation,

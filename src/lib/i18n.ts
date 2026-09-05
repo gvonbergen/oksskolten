@@ -520,6 +520,27 @@ const dict = {
   },
   'settings.semanticEnableOn': { ja: 'ON', en: 'ON', zh: 'ON'},
   'settings.semanticEnableOff': { ja: 'OFF', en: 'OFF', zh: 'OFF'},
+  // Summarization coverage dashboard (auto-summary row)
+  'integration.summaryStats': {
+    ja: '${summarized} / ${total} 件の記事を要約済み（未要約 ${missing} 件）',
+    en: '${summarized} of ${total} articles summarized — ${missing} missing',
+    zh: '已摘要 ${summarized} / ${total} 篇文章，还差 ${missing} 篇',
+  },
+  'integration.summaryStatsLoading': { ja: '要約状況を確認中…', en: 'Checking summary status…', zh: '正在检查摘要状态…'},
+  'integration.summaryStatsError': { ja: '要約状況の取得に失敗しました', en: 'Failed to load summary status', zh: '获取摘要状态失败'},
+  'integration.summaryRun': { ja: '未要約をまとめて要約', en: 'Summarize missing', zh: '摘要缺失文章'},
+  'integration.summaryRunning': {
+    ja: '要約中… 残り ${remaining} 件',
+    en: 'Summarizing… ${remaining} remaining',
+    zh: '摘要中… 剩余 ${remaining} 篇',
+  },
+  'integration.summaryRunFailed': { ja: '開始できませんでした', en: 'Could not start summarization', zh: '无法开始摘要'},
+  'integration.summaryConcurrency': { ja: '並列要約数', en: 'Parallel summarization calls', zh: '并行摘要请求数'},
+  'integration.summaryConcurrencyDesc': {
+    ja: 'LLM サーバーへ同時に送る要約リクエストの最大数（1-16）',
+    en: 'Maximum number of summarization requests sent to the LLM server at once (1-16)',
+    zh: '同时发送到 LLM 服务器的摘要请求上限（1-16）',
+  },
   'integration.modeLLM': { ja: 'LLM', en: 'LLM', zh: 'LLM'},
   'integration.modeTranslateService': { ja: '翻訳サービス', en: 'Translation Service', zh: '翻译服务'},
 
