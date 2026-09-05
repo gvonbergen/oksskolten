@@ -184,6 +184,24 @@ describe('summarizeArticle', () => {
     await expect(summarizeArticle('text')).rejects.toThrow('ANTHROPIC_KEY_NOT_SET')
     mockRequireKey.mockReset()
   })
+
+  it('enforces the global concurrency cap on concurrent calls', async () => {
+    mockGetSetting.mockImplementation((key: string) => (key === 'summary.concurrency' ? '2' : null))
+    let inFlight = 0
+    let peak = 0
+    mockCreateMessage.mockImplementation(async () => {
+      inFlight++
+      peak = Math.max(peak, inFlight)
+      await new Promise(resolve => setTimeout(resolve, 10))
+      inFlight--
+      return { text: 'ok', inputTokens: 0, outputTokens: 0 }
+    })
+
+    await Promise.all(Array.from({ length: 6 }, () => summarizeArticle('text')))
+
+    expect(peak).toBe(2)
+    expect(mockCreateMessage).toHaveBeenCalledTimes(6)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -204,6 +222,24 @@ describe('streamSummarizeArticle', () => {
     const onText = mockStreamMessage.mock.calls[0][1]
     onText('chunk')
     expect(deltas).toEqual(['chunk'])
+  })
+
+  it('shares the global concurrency cap with streaming calls', async () => {
+    mockGetSetting.mockImplementation((key: string) => (key === 'summary.concurrency' ? '1' : null))
+    let inFlight = 0
+    let peak = 0
+    mockStreamMessage.mockImplementation(async () => {
+      inFlight++
+      peak = Math.max(peak, inFlight)
+      await new Promise(resolve => setTimeout(resolve, 5))
+      inFlight--
+      return { text: 'ok', inputTokens: 0, outputTokens: 0 }
+    })
+
+    await Promise.all(Array.from({ length: 3 }, () => streamSummarizeArticle('text', () => {})))
+
+    expect(peak).toBe(1)
+    expect(mockStreamMessage).toHaveBeenCalledTimes(3)
   })
 })
 

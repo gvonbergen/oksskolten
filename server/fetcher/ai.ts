@@ -63,10 +63,7 @@ export async function autoSummarizeArticle(articleId: number, fullText: string):
     const before = getArticleById(articleId)
     if (!before || before.feed_type === 'clip' || before.summary?.trim()) return false
 
-    // Ingestion fire-and-forget calls share the configured parallelism
-    // limiter with the backfill job, so at most N summarization requests
-    // ever hit the LLM server at once.
-    const result = await runWithSummaryConcurrency(() => summarizeArticle(fullText))
+    const result = await summarizeArticle(fullText)
     if (getSetting('summary.auto') !== 'on') return false
     const latest = getArticleById(articleId)
     if (!latest || latest.feed_type === 'clip' || latest.summary?.trim()) return false
@@ -196,17 +193,31 @@ const translateConfig: AiTaskConfig = {
   buildPrompt: buildTranslatePrompt,
 }
 
+/**
+ * Shared summarization boundary. Every summary request — ingestion
+ * fire-and-forget, the backfill job, the article summarize endpoint, and
+ * the chat tools — goes through the configured parallelism limiter, so at
+ * most N summarization calls run against the LLM server at once.
+ */
+async function runSummarizeTask(
+  fullText: string,
+  onText?: (delta: string) => void,
+): Promise<{ summary: string } & AiTextResult> {
+  return runWithSummaryConcurrency(async () => {
+    const r = await runAiTask(summarizeConfig, fullText, onText)
+    return { summary: r.text, inputTokens: r.inputTokens, outputTokens: r.outputTokens, billingMode: r.billingMode, model: r.model }
+  })
+}
+
 export async function summarizeArticle(fullText: string): Promise<{ summary: string } & AiTextResult> {
-  const r = await runAiTask(summarizeConfig, fullText)
-  return { summary: r.text, inputTokens: r.inputTokens, outputTokens: r.outputTokens, billingMode: r.billingMode, model: r.model }
+  return runSummarizeTask(fullText)
 }
 
 export async function streamSummarizeArticle(
   fullText: string,
   onText: (delta: string) => void,
 ): Promise<{ summary: string } & AiTextResult> {
-  const r = await runAiTask(summarizeConfig, fullText, onText)
-  return { summary: r.text, inputTokens: r.inputTokens, outputTokens: r.outputTokens, billingMode: r.billingMode, model: r.model }
+  return runSummarizeTask(fullText, onText)
 }
 
 export async function translateArticle(fullText: string): Promise<{ fullTextTranslated: string } & AiTextResult> {
