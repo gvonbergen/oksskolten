@@ -78,7 +78,7 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
     setProvider(status.provider)
     setModelInput(status.model || '')
     setDimensionsInput(status.dimensions ? String(status.dimensions) : '')
-    setOpenaiBaseUrlInput(status.base_url || '')
+    setOpenaiBaseUrlInput(status.provider === 'openai' ? (status.base_url || '') : '')
     setInitialized(true)
   }, [status, initialized])
 
@@ -269,6 +269,13 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
                     type="button"
                     onClick={() => {
                       setProvider(p)
+                      // The OpenAI gateway override is scoped per provider: when
+                      // switching away and back to openai, restore the persisted
+                      // openai override only if openai is the active provider,
+                      // never the reused ollama base URL.
+                      setOpenaiBaseUrlInput(
+                        p === 'openai' ? (status?.provider === 'openai' ? (status.base_url || '') : '') : '',
+                      )
                       const def = EMBEDDING_DEFAULT_MODELS[p]
                       setModelInput(prev => {
                         if (provider === p) return prev

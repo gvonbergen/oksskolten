@@ -105,6 +105,42 @@ describe('embedding proxy endpoint forwarding', () => {
     return instance
   }
 
+  it('does not leak ollama.custom_headers to the OpenAI provider', async () => {
+    upstream = http.createServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', c => chunks.push(c))
+      req.on('end', () => {
+        received.push({ url: req.url, body: Buffer.concat(chunks).toString('utf8'), headers: req.headers })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ data: [{ embedding: new Array(1536).fill(0.1) }] }))
+      })
+    })
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+    const port = (upstream.address() as AddressInfo).port
+
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.base_url', `http://127.0.0.1:${port}/v1`)
+    // Operator-configured Ollama headers must never reach the OpenAI endpoint.
+    upsertSetting('ollama.custom_headers', JSON.stringify({ 'x-tenant': 'acme', authorization: 'Bearer sk-ollama-secret' }))
+    upsertSetting('api_key.openai', 'sk-openai')
+
+    app = Fastify()
+    await app.register(embeddingProxyRoutes)
+    const token = getEmbeddingProxyToken()
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/internal/embedding-proxy/${encodeURIComponent(token)}/embeddings`,
+      payload: { model: 'text-embedding-3-small', input: ['hello'] },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(received).toHaveLength(1)
+    expect(received[0].headers['x-tenant']).toBeUndefined()
+    // The openai credential is the auth header, not the ollama LLM header.
+    expect(received[0].headers['authorization']).toBe('Bearer sk-openai')
+  })
+
   it('forwards Ollama embedder requests to the Ollama /api/embed endpoint', async () => {
     app = await buildOllamaApp()
     const token = getEmbeddingProxyToken()

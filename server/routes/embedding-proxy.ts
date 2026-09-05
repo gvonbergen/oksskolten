@@ -38,12 +38,13 @@ export async function embeddingProxyRoutes(api: FastifyInstance): Promise<void> 
     }
 
     const body = typeof request.body === 'string' ? request.body : JSON.stringify(request.body ?? {})
-    const headers: Record<string, string> = {
-      // Ollama embeddings reuse the custom headers configured for the Ollama
-      // LLM provider (ollama.custom_headers); content-type is never overridden.
-      ...getOllamaCustomHeaders(),
-      'content-type': 'application/json',
-    }
+    // Ollama embeddings reuse the custom headers configured for the Ollama LLM
+    // provider; they must never reach the OpenAI-compatible endpoint. The
+    // content-type is never overridden by them.
+    const headers: Record<string, string> =
+      config.provider === 'ollama'
+        ? { ...getOllamaCustomHeaders(), 'content-type': 'application/json' }
+        : { 'content-type': 'application/json' }
     if (config.provider === 'openai' && config.apiKey) {
       headers.authorization = `Bearer ${config.apiKey}`
     }
