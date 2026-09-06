@@ -3,7 +3,7 @@
  * Pinned-Meilisearch smoke test for embedding-assisted search.
  *
  * Verifies the assumptions the oksskolten semantic-search feature relies on
- * against the real pinned image (getmeili/meilisearch:v1.13, same as
+ * against the real pinned image (getmeili/meilisearch:v1.15, same as
  * compose.yaml), using a local mock embedding endpoint — no external API:
  *
  *  1. A document with `_vectors: { <embedder>: null }` is NOT embedded
@@ -49,7 +49,7 @@ const { buildEmbeddersSettings, EMBEDDER_NAME } = await import('../server/search
 const MEILI_PORT = Number(process.env.SMOKE_MEILI_PORT || 7710)
 const MOCK_PORT = Number(process.env.SMOKE_MOCK_PORT || 7711)
 const OLLAMA_MOCK_PORT = Number(process.env.SMOKE_OLLAMA_MOCK_PORT || 7712)
-const MEILI_IMAGE = 'getmeili/meilisearch:v1.13'
+const MEILI_IMAGE = 'getmeili/meilisearch:v1.15'
 const MASTER_KEY = 'smoke-master-key'
 const DIMENSIONS = 8
 

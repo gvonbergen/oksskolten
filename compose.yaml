@@ -70,7 +70,12 @@ services:
       - internal
 
   meilisearch:
-    image: getmeili/meilisearch:v1.13
+    # v1.15 is the smallest version whose regenerate:true renders the
+    # embedder template from the INCOMING document: on v1.13/v1.14 a
+    # regenerate-flagged update renders the pre-update document, so an
+    # article's arriving summary never entered its vector (verified by
+    # scripts/meili-regen-compat-probe.mjs; see the version-compat report).
+    image: getmeili/meilisearch:v1.15
     restart: unless-stopped
     environment:
       MEILI_DB_PATH: /meili_data
