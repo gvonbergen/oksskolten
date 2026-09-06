@@ -6,7 +6,6 @@ import { logger } from '../logger.js'
 import {
   applyEmbeddingVectors,
   buildEmbeddersSettings,
-  EMBEDDER_NAME,
   getEmbeddingConfig,
   isEmbeddingPrerequisiteMet,
   matchesExpectedEmbedder,
@@ -738,73 +737,14 @@ export async function getSearchIndexRuntime(): Promise<SearchIndexRuntime> {
 
 // --- Fire-and-forget sync helpers ---
 
-/**
- * In-flight full-document sync chain per article id. The regenerate decision
- * reads the live index, so a later enqueue could otherwise overtake an
- * earlier one when the reads complete out of order. Serializing the complete
- * read→enqueue sequence per article keeps Meilisearch's FIFO task order in
- * DB-write order (last write wins), while different articles stay concurrent.
- */
-const pendingArticleSyncs = new Map<number, Promise<void>>()
-
-export function syncArticleToSearch(doc: MeiliArticleDoc): Promise<void> {
-  const base = applyEmbeddingVectors(doc, getEmbeddingConfig(), isEmbeddingPrerequisiteMet())
-  // Documents that must not be embedded (summary-less, clip, embeddings not
-  // configured) keep the explicit vectorless marker synchronously.
-  if (base._vectors?.[EMBEDDER_NAME] === null) {
-    enqueueFullDocumentUpsert(base)
-    return Promise.resolve()
-  }
-  const prior = pendingArticleSyncs.get(doc.id)
-  const run = prior ? prior.then(() => syncEmbeddingUpsert(doc)) : syncEmbeddingUpsert(doc)
-  let tracked: Promise<void>
-  tracked = run
-    .finally(() => {
-      if (pendingArticleSyncs.get(doc.id) === tracked) pendingArticleSyncs.delete(doc.id)
-    })
-    .catch(() => undefined)
-  pendingArticleSyncs.set(doc.id, tracked)
-  return tracked
-}
-
-async function syncEmbeddingUpsert(doc: MeiliArticleDoc): Promise<void> {
+export function syncArticleToSearch(doc: MeiliArticleDoc): void {
   const config = getEmbeddingConfig()
-  const prerequisiteMet = isEmbeddingPrerequisiteMet()
-  // Summary-bearing documents request regeneration only when the summary
-  // text actually changed against the indexed state (or when no previous
-  // document exists yet). Meilisearch renders the embedder documentTemplate
-  // only on fresh adds, so a summary arriving after a vectorless insert
-  // must carry the flag; unrelated full-document updates (retry stamps,
-  // refresh repairs, image rewrites, translations) with an unchanged
-  // summary must not re-invoke the embedding provider on every upsert.
-  let regenerate = false
-  try {
-    const current = (await getSearchClient().index(ARTICLES_INDEX).getDocument(doc.id)) as Partial<MeiliArticleDoc> | null
-    regenerate = normalizeSummary(current?.summary) !== normalizeSummary(doc.summary)
-  } catch (err) {
-    // A failed read cannot prove the summary is unchanged, so request
-    // regeneration rather than risk a changed summary silently staying
-    // vectorless. document_not_found just means a fresh add that embeds
-    // automatically from the template; any other read failure is surfaced.
-    if (!isDocumentNotFoundError(err)) {
-      log.error('Failed to read indexed article for embedding regeneration decision:', err)
-    }
-    regenerate = true
-  }
-  enqueueFullDocumentUpsert(applyEmbeddingVectors(doc, config, prerequisiteMet, regenerate ? { regenerate: true } : {}))
-}
-
-function normalizeSummary(summary: unknown): string {
-  return typeof summary === 'string' ? summary.trim() : ''
-}
-
-function isDocumentNotFoundError(err: unknown): boolean {
-  const cause = (err as { cause?: { code?: string } } | null)?.cause
-  const response = (err as { response?: { status?: number } } | null)?.response
-  return cause?.code === 'document_not_found' || response?.status === 404
-}
-
-function enqueueFullDocumentUpsert(embeddingDoc: MeiliArticleDoc): void {
+  // Incremental full-document upserts land on documents that were first
+  // inserted summary-less (explicitly vectorless). Meilisearch only renders
+  // the embedder documentTemplate on fresh adds, so without the regenerate
+  // flag the summary update would silently keep the vectorless state
+  // (keyword-searchable, invisible to semantic search).
+  const embeddingDoc = applyEmbeddingVectors(doc, config, isEmbeddingPrerequisiteMet(), { regenerate: true })
   try {
     const client = getSearchClient()
     const index = client.index(ARTICLES_INDEX)

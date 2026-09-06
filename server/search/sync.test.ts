@@ -11,23 +11,11 @@ const mockUpdateSettings = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockGetStats = vi.fn()
 const mockGetIndexes = vi.fn()
 const mockGetSettings = vi.fn()
-const mockGetDocument = vi.fn()
 const mockCreateIndex = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockDeleteIndex = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockDeleteDocument = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockDeleteDocuments = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockSwapIndexes = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
-const { mockLogError } = vi.hoisted(() => ({ mockLogError: vi.fn() }))
-vi.mock('../logger.js', () => ({
-  logger: {
-    child: vi.fn(() => ({
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: mockLogError,
-    })),
-  },
-}))
 vi.mock('./client.js', () => ({
   getSearchClient: () => ({
     getIndexes: mockGetIndexes,
@@ -37,7 +25,6 @@ vi.mock('./client.js', () => ({
       updateSettings: mockUpdateSettings,
       getStats: mockGetStats,
       getSettings: mockGetSettings,
-      getDocument: mockGetDocument,
       deleteDocument: mockDeleteDocument,
       deleteDocuments: mockDeleteDocuments,
     }),
@@ -164,10 +151,6 @@ describe('syncArticleToSearch — incremental full-document upsert embedding pol
   // with its summary once auto-summarization completes. Meilisearch renders
   // the embedder documentTemplate only on fresh adds, so the second upsert
   // must explicitly request regeneration or the document stays vectorless.
-  // Regeneration must be conditional: only when the summary text actually
-  // changed (first arrival, edits), so unrelated full-document updates
-  // (retry stamps, repairs, translations, image rewrites) with an unchanged
-  // summary do not re-invoke the embedding provider.
 
   function fullDoc(summary: string | null) {
     return {
@@ -201,20 +184,14 @@ describe('syncArticleToSearch — incremental full-document upsert embedding pol
     setupTestDb()
     _setRebuilding(false)
     mockAddDocuments.mockClear()
-    mockGetDocument.mockReset()
-    mockLogError.mockClear()
-    // Default indexed state: the article was first added summary-less
-    // (explicitly vectorless) and its summary has not arrived yet.
-    mockGetDocument.mockResolvedValue({ id: 1, summary: null })
   })
 
-  it('forwards _vectors.article-v1.regenerate to addDocuments when a summary first arrives on a vectorless doc', async () => {
+  it('forwards _vectors.article-v1.regenerate to addDocuments for summary-bearing upserts', () => {
     seedEmbeddingSettings()
     mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
 
-    await syncArticleToSearch(fullDoc('A fresh summary'))
+    syncArticleToSearch(fullDoc('A fresh summary'))
 
-    expect(mockGetDocument).toHaveBeenCalledWith(1)
     expect(mockAddDocuments).toHaveBeenCalledTimes(1)
     const sent = mockAddDocuments.mock.calls[0][0] as Array<Record<string, unknown>>
     expect(sent).toHaveLength(1)
@@ -222,120 +199,21 @@ describe('syncArticleToSearch — incremental full-document upsert embedding pol
     expect(sent[0]._vectors).toEqual({ 'article-v1': { regenerate: true } })
   })
 
-  it('requests regeneration when the summary text is edited', async () => {
-    seedEmbeddingSettings()
-    mockGetDocument.mockResolvedValue({ id: 1, summary: 'The old summary' })
-    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
-
-    await syncArticleToSearch(fullDoc('The new summary'))
-
-    const sent = mockAddDocuments.mock.calls[0][0] as Array<Record<string, unknown>>
-    expect(sent[0]._vectors).toEqual({ 'article-v1': { regenerate: true } })
-  })
-
-  it('requests regeneration when no previous document is indexed yet (fresh add)', async () => {
-    seedEmbeddingSettings()
-    mockGetDocument.mockRejectedValue(Object.assign(new Error('Document not found'), {
-      cause: { code: 'document_not_found', type: 'invalid_request_error', message: 'Document 1 not found.', link: 'https://docs.meilisearch.com' },
-      response: { status: 404 },
-    }))
-    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
-
-    await syncArticleToSearch(fullDoc('A fresh summary'))
-
-    const sent = mockAddDocuments.mock.calls[0][0] as Array<Record<string, unknown>>
-    expect(sent[0]._vectors).toEqual({ 'article-v1': { regenerate: true } })
-  })
-
-  it('does not request regeneration on full updates where the summary is unchanged', async () => {
-    seedEmbeddingSettings()
-    mockGetDocument.mockResolvedValue({ id: 1, summary: 'Same summary' })
-    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
-
-    await syncArticleToSearch(fullDoc('Same summary'))
-
-    const sent = mockAddDocuments.mock.calls[0][0] as Array<Record<string, unknown>>
-    expect(sent[0]).not.toHaveProperty('_vectors')
-  })
-
-  it('logs and conservatively regenerates when reading the indexed summary fails (non-404)', async () => {
-    seedEmbeddingSettings()
-    const readFailure = new Error('connection reset')
-    mockGetDocument.mockRejectedValue(readFailure)
-    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
-
-    await syncArticleToSearch(fullDoc('A changed summary'))
-
-    expect(mockLogError).toHaveBeenCalledTimes(1)
-    expect(mockLogError.mock.calls[0][0]).toContain('Failed to read indexed article')
-    expect(mockLogError.mock.calls[0][1]).toBe(readFailure)
-    const sent = mockAddDocuments.mock.calls[0][0] as Array<Record<string, unknown>>
-    expect(sent[0]._vectors).toEqual({ 'article-v1': { regenerate: true } })
-  })
-
-  it('serializes same-article syncs so the later DB write wins over read completion order', async () => {
-    seedEmbeddingSettings()
-    let releaseRead!: () => void
-    const gatedRead = new Promise<{ id: number; summary: null }>((resolve) => {
-      releaseRead = () => resolve({ id: 1, summary: null })
-    })
-    mockGetDocument.mockImplementationOnce(() => gatedRead).mockImplementationOnce(() => Promise.resolve({ id: 1, summary: null }))
-    mockAddDocuments.mockImplementationOnce(() => ({ catch: vi.fn() }))
-    mockAddDocuments.mockImplementationOnce(() => ({ catch: vi.fn() }))
-
-    const older = syncArticleToSearch(fullDoc('Older summary'))
-    const newer = syncArticleToSearch(fullDoc('Newer summary'))
-    await Promise.resolve()
-    // Serialization: only the first sync's read may be in flight.
-    expect(mockGetDocument).toHaveBeenCalledTimes(1)
-    releaseRead()
-    await Promise.all([older, newer])
-
-    expect(mockGetDocument).toHaveBeenCalledTimes(2)
-    // Enqueues follow DB-write (invocation) order, so the later write is
-    // last and wins in Meilisearch's FIFO task queue.
-    const summaries = mockAddDocuments.mock.calls.map((c) => (c[0][0] as { summary: string }).summary)
-    expect(summaries).toEqual(['Older summary', 'Newer summary'])
-  })
-
-  it('does not duplicate regeneration when an identical summary is synced again after the enqueue', async () => {
-    seedEmbeddingSettings()
-    let indexSummary: string | null = null
-    mockGetDocument.mockImplementation(async () => ({ id: 1, summary: indexSummary }))
-    mockAddDocuments.mockImplementationOnce((docs: Array<{ summary: string }>) => {
-      indexSummary = docs[0].summary
-      return { catch: vi.fn() }
-    })
-    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
-
-    const first = syncArticleToSearch(fullDoc('Same summary'))
-    const second = syncArticleToSearch(fullDoc('Same summary'))
-    await Promise.all([first, second])
-
-    expect(mockGetDocument).toHaveBeenCalledTimes(2)
-    const flags = mockAddDocuments.mock.calls.map((c) => (c[0][0] as { _vectors?: Record<string, unknown> })._vectors)
-    // The second sync observes the first enqueue's effect and must not
-    // re-request regeneration for identical text.
-    expect(flags.filter((v) => v?.['article-v1'])).toHaveLength(1)
-  })
-
-  it('keeps the explicit null marker for summary-less upserts without reading the index', async () => {
+  it('keeps the explicit null marker for summary-less upserts', () => {
     seedEmbeddingSettings()
     mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
 
-    await syncArticleToSearch(fullDoc(null))
+    syncArticleToSearch(fullDoc(null))
 
-    expect(mockGetDocument).not.toHaveBeenCalled()
     const sent = mockAddDocuments.mock.calls[0][0] as Array<Record<string, unknown>>
     expect(sent[0]._vectors).toEqual({ 'article-v1': null })
   })
 
-  it('marks upserts as explicit opt-outs when embeddings are disabled', async () => {
+  it('marks upserts as explicit opt-outs when embeddings are disabled', () => {
     mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
 
-    await syncArticleToSearch(fullDoc('A fresh summary'))
+    syncArticleToSearch(fullDoc('A fresh summary'))
 
-    expect(mockGetDocument).not.toHaveBeenCalled()
     const sent = mockAddDocuments.mock.calls[0][0] as Array<Record<string, unknown>>
     expect(sent[0]._vectors).toEqual({ 'article-v1': null })
   })
