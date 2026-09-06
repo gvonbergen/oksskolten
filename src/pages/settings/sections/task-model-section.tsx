@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useSWR from 'swr'
-import { fetcher } from '../../../lib/fetcher'
 import {
   ANTHROPIC_MODELS,
   GEMINI_MODELS,
@@ -12,6 +11,7 @@ import {
   LLM_TASK_PROVIDERS,
 } from '../../../data/aiModels'
 import type { ModelGroup } from '../../../data/aiModels'
+import { apiPost, fetcher } from '../../../lib/fetcher'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectGroup, SelectLabel, SelectItem } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import type { Settings } from '../../../hooks/use-settings'
@@ -152,7 +152,7 @@ export function TaskModelSection({ settings, t }: { settings: Settings; t: TFunc
       <p className="text-xs text-muted mb-4">{t('integration.taskSettingsDesc')}</p>
       <div className={`space-y-3 ${!keysLoading && !hasAnyKey ? 'opacity-50 pointer-events-none' : ''}`}>
         {tasks.map(task => (
-          <TaskModelRow key={task.labelKey} task={task} t={t} configuredKeys={configuredKeys} hasAnyTranslateKey={hasAnyTranslateKey} />
+          <TaskModelRow key={task.labelKey} task={task} t={t} configuredKeys={configuredKeys} hasAnyTranslateKey={hasAnyTranslateKey} settings={settings} />
         ))}
       </div>
       {!keysLoading && !hasAnyKey && (
@@ -177,7 +177,7 @@ function isTranslateService(provider: string): boolean {
 
 /* ── Task Model Row ── */
 
-function TaskModelRow({ task, t, configuredKeys, hasAnyTranslateKey }: { task: TaskConfig; t: TFunc; configuredKeys: Record<string, boolean>; hasAnyTranslateKey: boolean }) {
+function TaskModelRow({ task, t, configuredKeys, hasAnyTranslateKey, settings }: { task: TaskConfig; t: TFunc; configuredKeys: Record<string, boolean>; hasAnyTranslateKey: boolean; settings: Settings }) {
   const hasTranslateServices = !!task.hasTranslateServices
   const currentIsTranslateService = isTranslateService(task.providerValue)
 
@@ -193,6 +193,7 @@ function TaskModelRow({ task, t, configuredKeys, hasAnyTranslateKey }: { task: T
             <p className="text-[11px] font-medium text-text mb-1.5 select-none">{t('integration.autoSummary')}</p>
             <p className="text-[11px] text-muted/80 mb-2 select-none">{t('integration.autoSummaryDesc')}</p>
             <RadioInline value={task.autoValue === 'on' ? 'on' : 'off'} onChange={task.setAuto} t={t} />
+            <SummaryStatusPanel settings={settings} t={t} />
           </div>
         )}
       </div>
@@ -272,6 +273,124 @@ function MaxTokensInput({ task, t }: { task: TaskConfig; t: TFunc }) {
         className="w-24 text-right shrink-0"
         aria-label={t('integration.maxTokens')}
       />
+    </div>
+  )
+}
+
+/* ── Summary Status / Backfill Panel ── */
+
+interface SummaryStatus {
+  total: number
+  summarized: number
+  missing: number
+  backfillRunning: boolean
+  backfillQueue: number
+  backfillProcessed: number
+}
+
+const SUMMARY_CONCURRENCY_LIMIT = 16
+const SUMMARY_STATUS_POLL_MS = 2000
+
+function SummaryStatusPanel({ settings, t }: { settings: Settings; t: TFunc }) {
+  const { data, error, isLoading, mutate } = useSWR<SummaryStatus>(
+    '/api/settings/summary/status',
+    fetcher,
+    { revalidateOnFocus: false },
+  )
+
+  const running = data?.backfillRunning ?? false
+
+  // Poll while a backfill is active so progress shows up live; the final
+  // poll after completion also refreshes the summarized/missing counts.
+  useEffect(() => {
+    if (!running) return
+    const timer = setInterval(() => { void mutate() }, SUMMARY_STATUS_POLL_MS)
+    return () => clearInterval(timer)
+  }, [mutate, running])
+
+  // Re-check when the auto-summary configuration changes (e.g. a provider
+  // was just configured in this same section).
+  useEffect(() => {
+    void mutate()
+  }, [mutate, settings.summaryAuto, settings.summaryProvider, settings.summaryModel])
+
+  const [starting, setStarting] = useState(false)
+  const [actionError, setActionError] = useState(false)
+
+  const handleRun = async () => {
+    if (starting || running) return
+    setStarting(true)
+    setActionError(false)
+    try {
+      await apiPost('/api/settings/summary/run')
+      await mutate()
+    } catch {
+      setActionError(true)
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  const onChangeConcurrency = (raw: string) => {
+    // Digits only, clamped to the server-side 1-16 bound; empty clears the
+    // stored value so the server default applies.
+    const digits = raw.replace(/\D/g, '').replace(/^0+/, '')
+    settings.setSummaryConcurrency(digits ? String(Math.min(Number(digits), SUMMARY_CONCURRENCY_LIMIT)) : '')
+  }
+
+  const busy = starting || running
+
+  return (
+    <div className="mt-2 pt-2 border-t border-border/60 space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          {isLoading ? (
+            <p className="text-[11px] text-muted select-none">{t('integration.summaryStatsLoading')}</p>
+          ) : error || !data ? (
+            <p className="text-[11px] text-muted select-none">{t('integration.summaryStatsError')}</p>
+          ) : (
+            <p className="text-[11px] text-muted select-none">
+              {t('integration.summaryStats', {
+                summarized: String(data.summarized),
+                total: String(data.total),
+                missing: String(data.missing),
+              })}
+            </p>
+          )}
+          {actionError && (
+            <p className="text-[11px] text-error select-none">{t('integration.summaryRunFailed')}</p>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={handleRun}
+          disabled={busy}
+          className={`px-2 py-1 text-[11px] rounded shrink-0 transition-colors select-none ${
+            busy
+              ? 'bg-bg-subtle text-muted cursor-not-allowed'
+              : 'bg-accent text-accent-text font-medium shadow-sm hover:opacity-90'
+          }`}
+        >
+          {running
+            ? t('integration.summaryRunning', { remaining: String(data?.backfillQueue ?? 0) })
+            : t('integration.summaryRun')}
+        </button>
+      </div>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <span className="block text-[11px] text-text select-none">{t('integration.summaryConcurrency')}</span>
+          <span className="block text-[11px] text-muted/70 select-none">{t('integration.summaryConcurrencyDesc')}</span>
+        </div>
+        <Input
+          type="text"
+          inputMode="numeric"
+          value={settings.summaryConcurrency ?? ''}
+          onChange={e => onChangeConcurrency(e.target.value)}
+          placeholder="4"
+          className="w-24 text-right shrink-0"
+          aria-label={t('integration.summaryConcurrency')}
+        />
+      </div>
     </div>
   )
 }

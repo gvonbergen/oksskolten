@@ -769,6 +769,47 @@ describe('PATCH /api/settings/preferences — AI max tokens validation', () => {
   })
 })
 
+describe('PATCH /api/settings/preferences — summary concurrency validation', () => {
+  it.each(['1', '4', '16'])('accepts %s as a valid parallelism value', async (value) => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/settings/preferences',
+      headers: json,
+      payload: { 'summary.concurrency': value },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()['summary.concurrency']).toBe(value)
+  })
+
+  it('clears the value with an empty string (falls back to the default)', async () => {
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/settings/preferences',
+      headers: json,
+      payload: { 'summary.concurrency': '8' },
+    })
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/settings/preferences',
+      headers: json,
+      payload: { 'summary.concurrency': '' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()['summary.concurrency']).toBeNull()
+  })
+
+  it.each(['0', '-2', '17', '2.5', 'lots'])(`rejects invalid value %s`, async (value) => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/settings/preferences',
+      headers: json,
+      payload: { 'summary.concurrency': value },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/1-16/)
+  })
+})
+
 describe('vLLM endpoints', () => {
   it('GET /api/settings/vllm/status returns connection failed when unreachable', async () => {
     const mockFetch = vi.fn().mockRejectedValue(new Error('fetch failed'))

@@ -907,6 +907,7 @@ Unset items are `null`.
 | `summary.provider` | `"anthropic"` / `"gemini"` / `"openai"` / `"claude-code"` |
 | `summary.model` | Model ID depending on the provider |
 | `summary.max_tokens` | Positive integer 1-200000 (max output tokens for summarization; default 2048). Empty string to delete |
+| `summary.concurrency` | Positive integer 1-16 (max concurrent summarization LLM calls, shared across auto-summarization, the backfill job, on-demand, and chat tools; default 4) |
 | `translate.provider` | `"anthropic"` / `"gemini"` / `"openai"` / `"claude-code"` / `"google-translate"` / `"deepl"` |
 | `translate.model` | Model ID depending on the provider (not needed for google-translate / deepl) |
 | `translate.max_tokens` | Positive integer 1-200000 (max output tokens for translation; default 16384). Empty string to delete |
@@ -951,6 +952,38 @@ If `apiKey` is an empty string or omitted, the key is deleted.
 // Response: 200
 { "monthlyChars": 12345, "freeTierRemaining": 487655 }
 ```
+
+
+#### Summarization Coverage Endpoints
+
+**GET /api/settings/summary/status** — Summarization coverage counts + backfill progress
+
+Pure DB read — safe to call even when no summary provider is configured. Counts cover active, non-clip-feed articles that have full text; a summary counts when it is non-empty after trimming.
+
+```json
+// Response: 200
+{
+  "total": 437,
+  "summarized": 139,
+  "missing": 298,
+  "backfillRunning": false,
+  "backfillQueue": 0,
+  "backfillProcessed": 0
+}
+```
+
+`backfillQueue` is the remaining count for the current run (0 when idle); `backfillProcessed` is the number of articles attempted in the current (or last) run.
+
+**POST /api/settings/summary/run** — Start (or no-op) the missing-summaries backfill
+
+Single-flight trigger for the background job that walks articles without a summary in bounded batches and summarizes them through the shared concurrency limiter (at most `summary.concurrency` calls at once), gated by `summary.auto` and the configured provider. Idempotent — it reports the current state instead of starting a duplicate run.
+
+```json
+// Response: 200 (started, or nothing left to do)
+{ "ok": true, "started": true, "total": 437, "summarized": 139, "missing": 298, "backfillRunning": true, "backfillQueue": 298, "backfillProcessed": 0 }
+```
+
+Returns `400` (`{ "ok": false, "error": "...", "running": false }`) when automatic summarization is disabled or no summary provider is configured, and `409` (`{ "ok": false, "error": "...", "running": true }`) when a backfill is already running.
 
 
 #### Image Storage Settings Endpoints

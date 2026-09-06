@@ -701,6 +701,55 @@ export function deleteArticle(id: number): boolean {
   return result.changes > 0
 }
 
+/**
+ * Summarization coverage counts over the summarizable population: active
+ * (non-purged) articles from non-clip feeds that have extractable full text.
+ * Clip feeds are excluded because automatic summarization never runs for
+ * them, and articles without full text are excluded because they can never
+ * be summarized — so `missing` is always actionable by the backfill job.
+ * A summary counts when it is non-empty after trimming.
+ */
+export function getSummaryCounts(): { total: number; summarized: number } {
+  return getDb().prepare(`
+    SELECT COUNT(*) AS total,
+           COALESCE(SUM(CASE WHEN a.summary IS NOT NULL AND trim(a.summary) != '' THEN 1 ELSE 0 END), 0) AS summarized
+    FROM articles a
+    JOIN feeds f ON f.id = a.feed_id
+    WHERE a.purged_at IS NULL
+      AND f.type != 'clip'
+      AND a.full_text IS NOT NULL AND trim(a.full_text) != ''
+  `).get() as { total: number; summarized: number }
+}
+
+/**
+ * Summarizable articles (same population as getSummaryCounts) that still
+ * lack a non-empty summary, oldest first. `excludeIds` lets the backfill
+ * job skip articles it already attempted in the current run so permanent
+ * failures cannot spin the batch loop forever.
+ */
+export function getArticlesMissingSummaries(
+  limit: number,
+  excludeIds: ReadonlyArray<number> = [],
+): { id: number; full_text: string }[] {
+  if (limit <= 0) return []
+  const params: unknown[] = []
+  let sql = `
+    SELECT a.id, a.full_text
+    FROM articles a
+    JOIN feeds f ON f.id = a.feed_id
+    WHERE a.purged_at IS NULL
+      AND f.type != 'clip'
+      AND a.full_text IS NOT NULL AND trim(a.full_text) != ''
+      AND (a.summary IS NULL OR trim(a.summary) = '')`
+  if (excludeIds.length > 0) {
+    sql += ` AND a.id NOT IN (${excludeIds.map(() => '?').join(',')})`
+    params.push(...excludeIds)
+  }
+  sql += `\n    ORDER BY a.id\n    LIMIT ?`
+  params.push(limit)
+  return getDb().prepare(sql).all(...params) as { id: number; full_text: string }[]
+}
+
 export function getReadingStats(opts?: {
   since?: string
   until?: string

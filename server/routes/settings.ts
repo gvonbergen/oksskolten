@@ -50,6 +50,7 @@ const PREF_KEYS = [
   'summary.provider',
   'summary.model',
   'summary.max_tokens',
+  'summary.concurrency',
   'translate.provider',
   'translate.model',
   'translate.max_tokens',
@@ -87,6 +88,7 @@ const PREF_ALLOWED: Record<PrefKey, string[] | null> = {
   'summary.provider': ['anthropic', 'gemini', 'openai', 'claude-code', 'ollama', 'vllm'],
   'summary.model': getAllModelValues(),
   'summary.max_tokens': null,
+  'summary.concurrency': null,
   'translate.provider': ['anthropic', 'gemini', 'openai', 'claude-code', 'ollama', 'vllm', 'google-translate', 'deepl'],
   'translate.model': getAllModelValues(),
   'translate.max_tokens': null,
@@ -257,6 +259,14 @@ export async function settingsRoutes(api: FastifyInstance): Promise<void> {
         const parsed = z.coerce.number().int().min(1).max(200000).safeParse(value)
         if (!parsed.success) {
           reply.status(400).send({ error: `${key} must be a positive integer (1-200000)` })
+          return
+        }
+      }
+      // Validate summarization parallelism: integer 1-16 concurrent LLM calls
+      if (key === 'summary.concurrency') {
+        const parsed = z.coerce.number().int().min(1).max(16).safeParse(value)
+        if (!parsed.success) {
+          reply.status(400).send({ error: 'summary.concurrency must be an integer (1-16)' })
           return
         }
       }

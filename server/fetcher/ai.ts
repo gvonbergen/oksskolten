@@ -4,6 +4,7 @@ import { googleTranslate } from '../providers/translate/google-translate.js'
 import { deeplTranslate } from '../providers/translate/deepl.js'
 import { TASK_DEFAULTS } from '../../shared/models.js'
 import { getSummaryProviderModel } from '../search/embedding.js'
+import { runWithSummaryConcurrency } from './summary-concurrency.js'
 import { DEFAULT_LANGUAGE, languageName } from '../../shared/lang.js'
 import { logger } from '../logger.js'
 
@@ -192,17 +193,31 @@ const translateConfig: AiTaskConfig = {
   buildPrompt: buildTranslatePrompt,
 }
 
+/**
+ * Shared summarization boundary. Every summary request — ingestion
+ * fire-and-forget, the backfill job, the article summarize endpoint, and
+ * the chat tools — goes through the configured parallelism limiter, so at
+ * most N summarization calls run against the LLM server at once.
+ */
+async function runSummarizeTask(
+  fullText: string,
+  onText?: (delta: string) => void,
+): Promise<{ summary: string } & AiTextResult> {
+  return runWithSummaryConcurrency(async () => {
+    const r = await runAiTask(summarizeConfig, fullText, onText)
+    return { summary: r.text, inputTokens: r.inputTokens, outputTokens: r.outputTokens, billingMode: r.billingMode, model: r.model }
+  })
+}
+
 export async function summarizeArticle(fullText: string): Promise<{ summary: string } & AiTextResult> {
-  const r = await runAiTask(summarizeConfig, fullText)
-  return { summary: r.text, inputTokens: r.inputTokens, outputTokens: r.outputTokens, billingMode: r.billingMode, model: r.model }
+  return runSummarizeTask(fullText)
 }
 
 export async function streamSummarizeArticle(
   fullText: string,
   onText: (delta: string) => void,
 ): Promise<{ summary: string } & AiTextResult> {
-  const r = await runAiTask(summarizeConfig, fullText, onText)
-  return { summary: r.text, inputTokens: r.inputTokens, outputTokens: r.outputTokens, billingMode: r.billingMode, model: r.model }
+  return runSummarizeTask(fullText, onText)
 }
 
 export async function translateArticle(fullText: string): Promise<{ fullTextTranslated: string } & AiTextResult> {

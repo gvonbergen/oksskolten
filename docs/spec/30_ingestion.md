@@ -116,6 +116,9 @@ when the `summary.auto` setting is ON and a summary provider/model is configured
 articles with full text are summarized automatically (fire-and-forget, retried articles included).
 On-demand summarization (`POST /api/articles/:id/summarize`) remains available. Automatic summaries
 are also the prerequisite and embedding input for semantic search.
+All summarization calls — ingestion fire-and-forget, the settings-page backfill job
+(`POST /api/settings/summary/run`), on-demand, and chat tools — share one global parallelism
+limit against the LLM server: at most `summary.concurrency` calls run at once (default 4).
 
 ### Shared Article Fetch Function (`fetchArticleContent`)
 
