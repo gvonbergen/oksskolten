@@ -760,7 +760,14 @@ export async function syncArticleToSearch(doc: MeiliArticleDoc): Promise<void> {
     const current = (await getSearchClient().index(ARTICLES_INDEX).getDocument(doc.id)) as Partial<MeiliArticleDoc> | null
     regenerate = normalizeSummary(current?.summary) !== normalizeSummary(doc.summary)
   } catch (err) {
-    regenerate = isDocumentNotFoundError(err)
+    // A failed read cannot prove the summary is unchanged, so request
+    // regeneration rather than risk a changed summary silently staying
+    // vectorless. document_not_found just means a fresh add that embeds
+    // automatically from the template; any other read failure is surfaced.
+    if (!isDocumentNotFoundError(err)) {
+      log.error('Failed to read indexed article for embedding regeneration decision:', err)
+    }
+    regenerate = true
   }
   enqueueFullDocumentUpsert(applyEmbeddingVectors(doc, config, prerequisiteMet, regenerate ? { regenerate: true } : {}))
 }

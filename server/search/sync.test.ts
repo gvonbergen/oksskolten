@@ -17,6 +17,17 @@ const mockDeleteIndex = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockDeleteDocument = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockDeleteDocuments = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
 const mockSwapIndexes = vi.fn().mockReturnValue({ waitTask: mockWaitTask })
+const { mockLogError } = vi.hoisted(() => ({ mockLogError: vi.fn() }))
+vi.mock('../logger.js', () => ({
+  logger: {
+    child: vi.fn(() => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: mockLogError,
+    })),
+  },
+}))
 vi.mock('./client.js', () => ({
   getSearchClient: () => ({
     getIndexes: mockGetIndexes,
@@ -191,6 +202,7 @@ describe('syncArticleToSearch — incremental full-document upsert embedding pol
     _setRebuilding(false)
     mockAddDocuments.mockClear()
     mockGetDocument.mockReset()
+    mockLogError.mockClear()
     // Default indexed state: the article was first added summary-less
     // (explicitly vectorless) and its summary has not arrived yet.
     mockGetDocument.mockResolvedValue({ id: 1, summary: null })
@@ -244,6 +256,21 @@ describe('syncArticleToSearch — incremental full-document upsert embedding pol
 
     const sent = mockAddDocuments.mock.calls[0][0] as Array<Record<string, unknown>>
     expect(sent[0]).not.toHaveProperty('_vectors')
+  })
+
+  it('logs and conservatively regenerates when reading the indexed summary fails (non-404)', async () => {
+    seedEmbeddingSettings()
+    const readFailure = new Error('connection reset')
+    mockGetDocument.mockRejectedValue(readFailure)
+    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
+
+    await syncArticleToSearch(fullDoc('A changed summary'))
+
+    expect(mockLogError).toHaveBeenCalledTimes(1)
+    expect(mockLogError.mock.calls[0][0]).toContain('Failed to read indexed article')
+    expect(mockLogError.mock.calls[0][1]).toBe(readFailure)
+    const sent = mockAddDocuments.mock.calls[0][0] as Array<Record<string, unknown>>
+    expect(sent[0]._vectors).toEqual({ 'article-v1': { regenerate: true } })
   })
 
   it('keeps the explicit null marker for summary-less upserts without reading the index', async () => {
