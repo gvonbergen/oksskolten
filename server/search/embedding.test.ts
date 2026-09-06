@@ -255,13 +255,48 @@ describe('applyEmbeddingVectors', () => {
     expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: null })
   })
 
-  it('summarized docs get no _vectors and are embedded from the template', () => {
+  it('summarized docs get no _vectors by default and are embedded from the template (rebuild path: fresh adds)', () => {
     upsertSetting('embedding.enabled', 'on')
     upsertSetting('embedding.provider', 'openai')
     upsertSetting('embedding.model', 'text-embedding-3-small')
     upsertSetting('embedding.api_key', 'sk-x')
     const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: 'S' })
     expect(doc._vectors).toBeUndefined()
+  })
+
+  it('requests vector regeneration for summarized docs on incremental upserts (regenerate opt-in)', () => {
+    // Meilisearch renders the documentTemplate only on fresh adds; an
+    // addDocuments update of an existing vectorless document would otherwise
+    // keep it out of semantic search until the next full rebuild.
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-x')
+    const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: 'S' }, undefined, undefined, { regenerate: true })
+    expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: { regenerate: true } })
+  })
+
+  it('keeps the null marker for summary-less docs even with the regenerate opt-in', () => {
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-x')
+    const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: null }, undefined, undefined, { regenerate: true })
+    expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: null })
+  })
+
+  it('keeps the null marker for clipped docs even with the regenerate opt-in', () => {
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+    upsertSetting('embedding.api_key', 'sk-x')
+    const doc = applyEmbeddingVectors({ id: 1, title: 'T', feed_type: 'clip', summary: 'S' }, undefined, undefined, { regenerate: true })
+    expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: null })
+  })
+
+  it('keeps the null marker when embeddings are disabled even with the regenerate opt-in', () => {
+    const doc = applyEmbeddingVectors({ id: 1, title: 'T', summary: 'S' }, undefined, undefined, { regenerate: true })
+    expect(doc._vectors).toEqual({ [EMBEDDER_NAME]: null })
   })
 
   it('keeps manually clipped articles out of embeddings even when summarized', () => {

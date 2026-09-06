@@ -316,21 +316,47 @@ export function matchesExpectedEmbedder(
 }
 
 /**
+ * Options for `_vectors` attachment on document upserts.
+ */
+export interface EmbeddingVectorOptions {
+  /**
+   * Ask Meilisearch to regenerate this document's embeddings by sending
+   * `_vectors: { [EMBEDDER_NAME]: { regenerate: true } }` instead of relying
+   * on automatic template rendering. Required on incremental upserts:
+   * Meilisearch renders the embedder's documentTemplate only when a document
+   * is first ADDED — an `addDocuments` update of an existing document
+   * preserves its existing vector state (including an explicit vectorless
+   * marker from the summary-less insert), so a summary that arrives after
+   * ingestion would otherwise never be embedded until a full rebuild. The
+   * flag is harmless on fresh adds. The full rebuild/staging path must NOT
+   * set it: fresh adds already generate vectors, and a no-op update with
+   * the flag would be skipped anyway.
+   */
+  regenerate?: boolean
+}
+
+/**
  * Attach `_vectors` to documents that must not be embedded. Meilisearch
  * treats a null embedder entry as "this document has no embeddings" and
- * skips automatic generation, so we never send title-only vectors for
+ * skips generation entirely, so we never send title-only vectors for
  * un-summarized articles. Manually clipped articles are always skipped, even
  * if they have a summary. Other summarized documents carry no `_vectors`
- * field and are embedded automatically from the template; a later summary
- * update re-upserts the document and regenerates the vector idempotently.
+ * field and are embedded automatically from the template on fresh adds
+ * (rebuild path); incremental upserts of existing documents pass
+ * `opts.regenerate` so a later summary update actually regenerates the
+ * vector instead of silently preserving the old vectorless state.
  */
 export function applyEmbeddingVectors<T extends { summary?: string | null; feed_type?: string }>(
   doc: T,
   config: EmbeddingConfig = getEmbeddingConfig(),
   prerequisiteMet: boolean = isEmbeddingPrerequisiteMet(),
-): T & { _vectors?: Record<string, null> } {
+  opts: EmbeddingVectorOptions = {},
+): T & { _vectors?: Record<string, null | { regenerate: boolean }> } {
   if (!buildEmbeddersSettings(config) || !prerequisiteMet || doc.feed_type === 'clip' || !doc.summary?.trim()) {
     return { ...doc, _vectors: { [EMBEDDER_NAME]: null } }
+  }
+  if (opts.regenerate) {
+    return { ...doc, _vectors: { [EMBEDDER_NAME]: { regenerate: true } } }
   }
   return doc
 }

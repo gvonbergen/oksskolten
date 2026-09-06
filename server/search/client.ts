@@ -38,8 +38,8 @@ export interface MeiliArticleDoc {
   is_unread: boolean
   is_liked: boolean
   is_bookmarked: boolean
-  /** Optional Meilisearch-managed embedding control (set to null to skip a document) */
-  _vectors?: Record<string, null>
+  /** Optional Meilisearch-managed embedding control (null to skip a document, `{ regenerate: true }` to force re-embedding) */
+  _vectors?: Record<string, null | { regenerate: boolean }>
 }
 
 /**

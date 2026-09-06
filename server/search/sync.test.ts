@@ -36,7 +36,7 @@ vi.mock('./client.js', () => ({
   ARTICLES_STAGING_INDEX: 'articles_staging',
 }))
 
-import { ensureSearchIndex, isSearchReady, isSemanticReady, isRebuilding, rebuildSearchIndex, requestSearchRebuild, syncAllScoredArticlesToSearch, syncArticleFiltersToSearch, syncArticlesByFeedToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, _setSwapRetryDelay, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
+import { ensureSearchIndex, isSearchReady, isSemanticReady, isRebuilding, rebuildSearchIndex, requestSearchRebuild, syncAllScoredArticlesToSearch, syncArticleFiltersToSearch, syncArticleToSearch, syncArticlesByFeedToSearch, _setRebuilding, _setSearchReady, _setLiveEmbedderVerified, _resetRebuildRecord, _setSwapRetryDelay, getSearchIndexRuntime, resolveIndexSettings } from './sync.js'
 import { upsertSetting, deleteSetting } from '../db.js'
 
 function seedFeed(): number {
@@ -142,6 +142,80 @@ describe('syncAllScoredArticlesToSearch', () => {
 
     const docs = mockUpdateDocuments.mock.calls[0][0] as Record<string, unknown>[]
     expect(Object.keys(docs[0]).sort()).toEqual(['id', 'score'])
+  })
+})
+
+describe('syncArticleToSearch — incremental full-document upsert embedding policy', () => {
+  // Regression for the 303 summarized / 283 embedded drift: an article is
+  // upserted summary-less (explicitly vectorless) at ingestion, then again
+  // with its summary once auto-summarization completes. Meilisearch renders
+  // the embedder documentTemplate only on fresh adds, so the second upsert
+  // must explicitly request regeneration or the document stays vectorless.
+
+  function fullDoc(summary: string | null) {
+    return {
+      id: 1,
+      feed_id: 1,
+      category_id: null,
+      title: 'Article',
+      summary,
+      full_text: 'Body',
+      full_text_translated: '',
+      lang: 'en',
+      published_at: 1,
+      score: 0,
+      is_unread: true,
+      is_liked: false,
+      is_bookmarked: false,
+    }
+  }
+
+  function seedEmbeddingSettings() {
+    upsertSetting('summary.auto', 'on')
+    upsertSetting('summary.provider', 'openai')
+    upsertSetting('summary.model', 'gpt-4.1-mini')
+    upsertSetting('api_key.openai', 'sk-summary')
+    upsertSetting('embedding.enabled', 'on')
+    upsertSetting('embedding.provider', 'openai')
+    upsertSetting('embedding.model', 'text-embedding-3-small')
+  }
+
+  beforeEach(() => {
+    setupTestDb()
+    _setRebuilding(false)
+    mockAddDocuments.mockClear()
+  })
+
+  it('forwards _vectors.article-v1.regenerate to addDocuments for summary-bearing upserts', () => {
+    seedEmbeddingSettings()
+    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
+
+    syncArticleToSearch(fullDoc('A fresh summary'))
+
+    expect(mockAddDocuments).toHaveBeenCalledTimes(1)
+    const sent = mockAddDocuments.mock.calls[0][0] as Array<Record<string, unknown>>
+    expect(sent).toHaveLength(1)
+    expect(sent[0].id).toBe(1)
+    expect(sent[0]._vectors).toEqual({ 'article-v1': { regenerate: true } })
+  })
+
+  it('keeps the explicit null marker for summary-less upserts', () => {
+    seedEmbeddingSettings()
+    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
+
+    syncArticleToSearch(fullDoc(null))
+
+    const sent = mockAddDocuments.mock.calls[0][0] as Array<Record<string, unknown>>
+    expect(sent[0]._vectors).toEqual({ 'article-v1': null })
+  })
+
+  it('marks upserts as explicit opt-outs when embeddings are disabled', () => {
+    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
+
+    syncArticleToSearch(fullDoc('A fresh summary'))
+
+    const sent = mockAddDocuments.mock.calls[0][0] as Array<Record<string, unknown>>
+    expect(sent[0]._vectors).toEqual({ 'article-v1': null })
   })
 })
 
