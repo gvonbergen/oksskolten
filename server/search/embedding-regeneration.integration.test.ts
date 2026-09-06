@@ -71,7 +71,9 @@ describe.skipIf(!runSuite)('live Meilisearch: incremental summary-to-embedding r
     }
   })
 
-  it('inserts summary-less (vectorless), then regenerates when the summary arrives', async () => {
+  it('inserts summary-less (vectorless), then regenerates when the summary arrives', { timeout: 180_000 }, async () => {
+    // 180s: real Ollama embedding of 3 sequential updates takes well over
+    // vitest's default 5s per-test timeout even on healthy infrastructure.
     await waitForTask(await client.createIndex(indexUid, { primaryKey: 'id' }))
     await waitForTask(await client.index(indexUid).updateSettings({
       embedders: ollamaAvailable
