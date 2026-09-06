@@ -738,16 +738,38 @@ export async function getSearchIndexRuntime(): Promise<SearchIndexRuntime> {
 
 // --- Fire-and-forget sync helpers ---
 
-export async function syncArticleToSearch(doc: MeiliArticleDoc): Promise<void> {
-  const config = getEmbeddingConfig()
-  const prerequisiteMet = isEmbeddingPrerequisiteMet()
-  const base = applyEmbeddingVectors(doc, config, prerequisiteMet)
+/**
+ * In-flight full-document sync chain per article id. The regenerate decision
+ * reads the live index, so a later enqueue could otherwise overtake an
+ * earlier one when the reads complete out of order. Serializing the complete
+ * read→enqueue sequence per article keeps Meilisearch's FIFO task order in
+ * DB-write order (last write wins), while different articles stay concurrent.
+ */
+const pendingArticleSyncs = new Map<number, Promise<void>>()
+
+export function syncArticleToSearch(doc: MeiliArticleDoc): Promise<void> {
+  const base = applyEmbeddingVectors(doc, getEmbeddingConfig(), isEmbeddingPrerequisiteMet())
   // Documents that must not be embedded (summary-less, clip, embeddings not
   // configured) keep the explicit vectorless marker synchronously.
   if (base._vectors?.[EMBEDDER_NAME] === null) {
     enqueueFullDocumentUpsert(base)
-    return
+    return Promise.resolve()
   }
+  const prior = pendingArticleSyncs.get(doc.id)
+  const run = prior ? prior.then(() => syncEmbeddingUpsert(doc)) : syncEmbeddingUpsert(doc)
+  let tracked: Promise<void>
+  tracked = run
+    .finally(() => {
+      if (pendingArticleSyncs.get(doc.id) === tracked) pendingArticleSyncs.delete(doc.id)
+    })
+    .catch(() => undefined)
+  pendingArticleSyncs.set(doc.id, tracked)
+  return tracked
+}
+
+async function syncEmbeddingUpsert(doc: MeiliArticleDoc): Promise<void> {
+  const config = getEmbeddingConfig()
+  const prerequisiteMet = isEmbeddingPrerequisiteMet()
   // Summary-bearing documents request regeneration only when the summary
   // text actually changed against the indexed state (or when no previous
   // document exists yet). Meilisearch renders the embedder documentTemplate

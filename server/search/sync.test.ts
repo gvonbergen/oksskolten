@@ -273,6 +273,52 @@ describe('syncArticleToSearch — incremental full-document upsert embedding pol
     expect(sent[0]._vectors).toEqual({ 'article-v1': { regenerate: true } })
   })
 
+  it('serializes same-article syncs so the later DB write wins over read completion order', async () => {
+    seedEmbeddingSettings()
+    let releaseRead!: () => void
+    const gatedRead = new Promise<{ id: number; summary: null }>((resolve) => {
+      releaseRead = () => resolve({ id: 1, summary: null })
+    })
+    mockGetDocument.mockImplementationOnce(() => gatedRead).mockImplementationOnce(() => Promise.resolve({ id: 1, summary: null }))
+    mockAddDocuments.mockImplementationOnce(() => ({ catch: vi.fn() }))
+    mockAddDocuments.mockImplementationOnce(() => ({ catch: vi.fn() }))
+
+    const older = syncArticleToSearch(fullDoc('Older summary'))
+    const newer = syncArticleToSearch(fullDoc('Newer summary'))
+    await Promise.resolve()
+    // Serialization: only the first sync's read may be in flight.
+    expect(mockGetDocument).toHaveBeenCalledTimes(1)
+    releaseRead()
+    await Promise.all([older, newer])
+
+    expect(mockGetDocument).toHaveBeenCalledTimes(2)
+    // Enqueues follow DB-write (invocation) order, so the later write is
+    // last and wins in Meilisearch's FIFO task queue.
+    const summaries = mockAddDocuments.mock.calls.map((c) => (c[0][0] as { summary: string }).summary)
+    expect(summaries).toEqual(['Older summary', 'Newer summary'])
+  })
+
+  it('does not duplicate regeneration when an identical summary is synced again after the enqueue', async () => {
+    seedEmbeddingSettings()
+    let indexSummary: string | null = null
+    mockGetDocument.mockImplementation(async () => ({ id: 1, summary: indexSummary }))
+    mockAddDocuments.mockImplementationOnce((docs: Array<{ summary: string }>) => {
+      indexSummary = docs[0].summary
+      return { catch: vi.fn() }
+    })
+    mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
+
+    const first = syncArticleToSearch(fullDoc('Same summary'))
+    const second = syncArticleToSearch(fullDoc('Same summary'))
+    await Promise.all([first, second])
+
+    expect(mockGetDocument).toHaveBeenCalledTimes(2)
+    const flags = mockAddDocuments.mock.calls.map((c) => (c[0][0] as { _vectors?: Record<string, unknown> })._vectors)
+    // The second sync observes the first enqueue's effect and must not
+    // re-request regeneration for identical text.
+    expect(flags.filter((v) => v?.['article-v1'])).toHaveLength(1)
+  })
+
   it('keeps the explicit null marker for summary-less upserts without reading the index', async () => {
     seedEmbeddingSettings()
     mockAddDocuments.mockReturnValueOnce({ catch: vi.fn() })
