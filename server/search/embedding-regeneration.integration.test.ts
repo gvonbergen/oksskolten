@@ -95,6 +95,12 @@ describe.skipIf(!runSuite)('live Meilisearch: incremental summary-to-embedding r
     if (ollamaAvailable) expect(s.numberOfEmbeddings).toBe(0)
 
     // 3. The fix: the same upsert WITH the regenerate flag embeds the doc.
+    //    Meilisearch-generated vectors live in its internal vector store and
+    //    do NOT appear in the stored document's `_vectors` field, so the
+    //    observable contract is semantic search: a summary-term query must
+    //    rank the doc first even though the summary text never appears in
+    //    any title (a second distractor doc prevents keyword fallback from
+    //    trivially matching a single-document index).
     await waitForTask(await client.index(indexUid).addDocuments([
       { ...base, summary: 'A brand new summary.', _vectors: { [EMBEDDER]: { regenerate: true } } },
     ]))
@@ -102,8 +108,23 @@ describe.skipIf(!runSuite)('live Meilisearch: incremental summary-to-embedding r
     expect(s.numberOfDocuments).toBe(1)
     if (ollamaAvailable) {
       expect(s.numberOfEmbeddings).toBe(1)
-      const doc = await client.index(indexUid).getDocument(1)
-      expect((doc as unknown as { _vectors?: Record<string, unknown> })._vectors?.[EMBEDDER]).toBeTruthy()
+
+      // Distractor: disjoint title/summary topics, same app-flow sequence.
+      const other = { id: 2, title: 'Harbor logistics bulletin', summary: null as string | null }
+      await waitForTask(await client.index(indexUid).addDocuments([
+        { ...other, _vectors: { [EMBEDDER]: null } },
+      ]))
+      await waitForTask(await client.index(indexUid).addDocuments([
+        { ...other, summary: 'glaciers retreat as polar temperatures rise', _vectors: { [EMBEDDER]: { regenerate: true } } },
+      ]))
+      const hybrid = (q: string) => client.index(indexUid).search(q, { hybrid: { semanticRatio: 1.0, embedder: EMBEDDER }, limit: 2 })
+      const summaryHit = (await hybrid('brand new summary wording'))?.hits[0]?.id
+      expect(summaryHit).toBe(1)
+      const otherSummaryHit = (await hybrid('glaciers retreat polar temperatures'))?.hits[0]?.id
+      expect(otherSummaryHit).toBe(2)
+      // Control: title terms still resolve to their own docs.
+      const titleHit = (await hybrid('Integration Test Article'))?.hits[0]?.id
+      expect(titleHit).toBe(1)
     }
   })
 })
