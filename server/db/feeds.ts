@@ -2,6 +2,7 @@ import { getDb, runNamed } from './connection.js'
 import type { Feed, FeedWithCounts } from './types.js'
 import type { MeiliArticleDoc } from '../search/client.js'
 import { deleteArticlesFromSearch, syncArticlesByFeedToSearch } from '../search/sync.js'
+import { stripMeiliDocMetadata } from './articles.js'
 
 export function getFeeds(): FeedWithCounts[] {
   return getDb().prepare(`
@@ -140,36 +141,19 @@ export function updateFeed(
 
   // Meilisearch sync outside transaction (external service, best-effort)
   if (data.category_id !== undefined) {
-    const docs = getDb().prepare(`
-      SELECT a.id, a.feed_id, a.category_id, a.title,
-             a.summary,
-             f.type AS feed_type,
-             COALESCE(a.full_text, '') AS full_text,
-             COALESCE(a.full_text_translated, '') AS full_text_translated,
-             a.lang,
-             COALESCE(CAST(strftime('%s', a.published_at) AS INTEGER), 0) AS published_at,
-             COALESCE(a.score, 0) AS score,
-             (a.seen_at IS NULL) AS is_unread,
-             (a.liked_at IS NOT NULL) AS is_liked,
-             (a.bookmarked_at IS NOT NULL) AS is_bookmarked
-      FROM active_articles a JOIN feeds f ON f.id = a.feed_id WHERE a.feed_id = ?
-    `).all(id) as MeiliArticleDoc[]
-    syncArticlesByFeedToSearch(docs)
+    syncArticlesByFeedToSearch(getFeedMoveDocs([id]))
   }
 
   return updatedFeed
 }
 
-export function bulkMoveFeedsToCategory(feedIds: number[], categoryId: number | null): void {
-  if (feedIds.length === 0) return
+/**
+ * Meilisearch documents for a set of feeds being moved to another
+ * category, sanitized of libsql's leaked `_metadata` row artifact.
+ */
+function getFeedMoveDocs(feedIds: number[]): MeiliArticleDoc[] {
   const placeholders = feedIds.map(() => '?').join(',')
-  getDb().transaction(() => {
-    getDb().prepare(`UPDATE feeds SET category_id = ? WHERE id IN (${placeholders})`).run(categoryId, ...feedIds)
-    getDb().prepare(`UPDATE articles SET category_id = ? WHERE feed_id IN (${placeholders})`).run(categoryId, ...feedIds)
-  })()
-
-  // Sync Meilisearch index for all affected feeds in one batch
-  const allDocs = getDb().prepare(`
+  return (getDb().prepare(`
     SELECT a.id, a.feed_id, a.category_id, a.title,
            a.summary,
            f.type AS feed_type,
@@ -182,8 +166,20 @@ export function bulkMoveFeedsToCategory(feedIds: number[], categoryId: number | 
            (a.liked_at IS NOT NULL) AS is_liked,
            (a.bookmarked_at IS NOT NULL) AS is_bookmarked
     FROM active_articles a JOIN feeds f ON f.id = a.feed_id WHERE a.feed_id IN (${placeholders})
-  `).all(...feedIds) as MeiliArticleDoc[]
-  syncArticlesByFeedToSearch(allDocs)
+  `).all(...feedIds) as (MeiliArticleDoc & { _metadata?: unknown })[])
+    .map(stripMeiliDocMetadata)
+}
+
+export function bulkMoveFeedsToCategory(feedIds: number[], categoryId: number | null): void {
+  if (feedIds.length === 0) return
+  const placeholders = feedIds.map(() => '?').join(',')
+  getDb().transaction(() => {
+    getDb().prepare(`UPDATE feeds SET category_id = ? WHERE id IN (${placeholders})`).run(categoryId, ...feedIds)
+    getDb().prepare(`UPDATE articles SET category_id = ? WHERE feed_id IN (${placeholders})`).run(categoryId, ...feedIds)
+  })()
+
+  // Sync Meilisearch index for all affected feeds in one batch
+  syncArticlesByFeedToSearch(getFeedMoveDocs(feedIds))
 }
 
 export function deleteFeed(id: number): boolean {

@@ -329,8 +329,9 @@ export interface EmbeddingVectorOptions {
    * marker from the summary-less insert), so a summary that arrives after
    * ingestion would otherwise never be embedded until a full rebuild. The
    * flag is harmless on fresh adds. The full rebuild/staging path must NOT
-   * set it: fresh adds already generate vectors. Meilisearch regenerates
-   * embeddings on every update carrying the flag.
+   * set it: fresh adds already generate vectors. Regeneration is
+   * idempotent: an update whose embeddable text did not change causes no
+   * new provider calls (verified on v1.15 by the compat probe).
    */
   regenerate?: boolean
 }

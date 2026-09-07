@@ -16,7 +16,7 @@ import {
   getRetryStats,
 } from '../db.js'
 import { createFeed, createCategory, getDb } from '../db.js'
-import { buildMeiliDoc } from './articles.js'
+import { buildMeiliDoc, stripMeiliDocMetadata } from './articles.js'
 
 beforeEach(() => {
   setupTestDb()
@@ -70,6 +70,28 @@ describe('buildMeiliDoc', () => {
       'full_text_translated', 'id', 'is_bookmarked', 'is_liked', 'is_unread',
       'lang', 'published_at', 'score', 'summary', 'title',
     ])
+  })
+})
+
+// --- stripMeiliDocMetadata: shared row sanitizer for incremental builders ---
+
+describe('stripMeiliDocMetadata', () => {
+  it('strips the libsql _metadata artifact while preserving document fields', () => {
+    const raw = {
+      id: 7,
+      title: 'T',
+      summary: 'S',
+      score: 3,
+      _metadata: { duration: 2 },
+    }
+    const doc = stripMeiliDocMetadata(raw)
+    expect(doc).toEqual({ id: 7, title: 'T', summary: 'S', score: 3 })
+    expect(doc).not.toHaveProperty('_metadata')
+  })
+
+  it('leaves rows without the artifact untouched', () => {
+    const raw = { id: 1, title: 'T' }
+    expect(stripMeiliDocMetadata(raw)).toEqual({ id: 1, title: 'T' })
   })
 })
 

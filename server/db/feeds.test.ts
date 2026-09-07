@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setupTestDb } from '../__tests__/helpers/testDb.js'
 import {
   createFeed,
@@ -12,10 +12,24 @@ import {
   updateFeedError,
   updateFeedRateLimit,
   updateFeedSchedule,
+  bulkMoveFeedsToCategory,
 } from '../db.js'
+
+// Observe the exact Meilisearch documents handed to the search sync boundary
+// by the category-move builders without a running Meilisearch; every other
+// export keeps its real implementation.
+vi.mock('../search/sync.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../search/sync.js')>()
+  return { ...actual, syncArticlesByFeedToSearch: vi.fn() }
+})
+
+import { syncArticlesByFeedToSearch } from '../search/sync.js'
+
+const mockSyncArticlesByFeedToSearch = vi.mocked(syncArticlesByFeedToSearch)
 
 beforeEach(() => {
   setupTestDb()
+  mockSyncArticlesByFeedToSearch.mockClear()
 })
 
 function seedFeed(overrides: Partial<Parameters<typeof createFeed>[0]> = {}) {
@@ -108,6 +122,57 @@ describe('updateFeed no-op', () => {
 
     expect(result).toBeDefined()
     expect(result!.name).toBe('Original')
+  })
+})
+
+describe('feed category-move Meilisearch documents', () => {
+  const expectedKeys = [
+    'category_id', 'feed_id', 'feed_type', 'full_text', 'full_text_translated',
+    'id', 'is_bookmarked', 'is_liked', 'is_unread', 'lang', 'published_at',
+    'score', 'summary', 'title',
+  ].sort()
+
+  it('syncs sanitized documents with only the intended fields on feed category move', () => {
+    const cat = createCategory('Tech')
+    const feed = seedFeed()
+    seedArticle(feed.id, { summary: 'A summary' })
+
+    updateFeed(feed.id, { category_id: cat.id })
+
+    expect(mockSyncArticlesByFeedToSearch).toHaveBeenCalledTimes(1)
+    const docs = mockSyncArticlesByFeedToSearch.mock.calls[0][0] as Record<string, unknown>[]
+    expect(docs).toHaveLength(1)
+    docs.forEach((doc) => {
+      expect(Object.keys(doc).sort()).toEqual(expectedKeys)
+      expect(doc).not.toHaveProperty('_metadata')
+    })
+  })
+
+  it('syncs sanitized documents for every moved feed on bulk category move', () => {
+    const cat = createCategory('Tech')
+    const feedA = seedFeed({ url: 'https://a.example.com' })
+    const feedB = seedFeed({ url: 'https://b.example.com' })
+    seedArticle(feedA.id, { summary: 'A summary' })
+    seedArticle(feedB.id)
+
+    bulkMoveFeedsToCategory([feedA.id, feedB.id], cat.id)
+
+    expect(mockSyncArticlesByFeedToSearch).toHaveBeenCalledTimes(1)
+    const docs = mockSyncArticlesByFeedToSearch.mock.calls[0][0] as Record<string, unknown>[]
+    expect(docs).toHaveLength(2)
+    docs.forEach((doc) => {
+      expect(Object.keys(doc).sort()).toEqual(expectedKeys)
+      expect(doc).not.toHaveProperty('_metadata')
+    })
+  })
+
+  it('does not sync when only non-category fields change', () => {
+    const feed = seedFeed()
+    seedArticle(feed.id, { summary: 'A summary' })
+
+    updateFeed(feed.id, { rss_url: 'https://example.com/feed.xml' })
+
+    expect(mockSyncArticlesByFeedToSearch).not.toHaveBeenCalled()
   })
 })
 

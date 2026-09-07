@@ -37,8 +37,20 @@ export function buildMeiliDoc(id: number): MeiliArticleDoc | null {
     FROM articles a JOIN feeds f ON f.id = a.feed_id WHERE a.id = ?
   `).get(id) as (MeiliArticleDoc & { _metadata?: unknown }) | undefined
   if (!row) return null
-  const { _metadata: _libsqlMetadataLeak, ...doc } = row
-  return applyEmbeddingVectors(doc)
+  return applyEmbeddingVectors(stripMeiliDocMetadata(row))
+}
+
+/**
+ * Strip libsql's `_metadata: { duration }` row-shape artifact from a raw
+ * row before it becomes a Meilisearch document. `.get()` rows carry the
+ * leak (reproduced in the buildMeiliDoc tests); `.all()` rows are clean in
+ * 0.5.x but routing every incremental builder through this helper keeps
+ * the no-`_metadata` document contract on one shared path. Exported for
+ * regression tests.
+ */
+export function stripMeiliDocMetadata<T extends object>(row: T): T {
+  const { _metadata: _libsqlMetadataLeak, ...doc } = row as T & { _metadata?: unknown }
+  return doc as T
 }
 
 // --- Score computation ---
