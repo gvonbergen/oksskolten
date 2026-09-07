@@ -74,7 +74,7 @@ services:
     # embedder template from the INCOMING document: on v1.13/v1.14 a
     # regenerate-flagged update renders the pre-update document, so an
     # article's arriving summary never entered its vector (verified by
-    # scripts/meili-regen-compat-probe.mjs; see the version-compat report).
+    # scripts/meili-regen-compat-probe.mjs).
     image: getmeili/meilisearch:v1.15
     restart: unless-stopped
     environment:

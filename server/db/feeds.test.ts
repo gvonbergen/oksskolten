@@ -140,7 +140,7 @@ describe('feed category-move Meilisearch documents', () => {
     updateFeed(feed.id, { category_id: cat.id })
 
     expect(mockSyncArticlesByFeedToSearch).toHaveBeenCalledTimes(1)
-    const docs = mockSyncArticlesByFeedToSearch.mock.calls[0][0] as Record<string, unknown>[]
+    const docs = mockSyncArticlesByFeedToSearch.mock.calls[0][0] as unknown as Record<string, unknown>[]
     expect(docs).toHaveLength(1)
     docs.forEach((doc) => {
       expect(Object.keys(doc).sort()).toEqual(expectedKeys)
@@ -158,7 +158,7 @@ describe('feed category-move Meilisearch documents', () => {
     bulkMoveFeedsToCategory([feedA.id, feedB.id], cat.id)
 
     expect(mockSyncArticlesByFeedToSearch).toHaveBeenCalledTimes(1)
-    const docs = mockSyncArticlesByFeedToSearch.mock.calls[0][0] as Record<string, unknown>[]
+    const docs = mockSyncArticlesByFeedToSearch.mock.calls[0][0] as unknown as Record<string, unknown>[]
     expect(docs).toHaveLength(2)
     docs.forEach((doc) => {
       expect(Object.keys(doc).sort()).toEqual(expectedKeys)
