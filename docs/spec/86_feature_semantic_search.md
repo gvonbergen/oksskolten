@@ -183,6 +183,7 @@ Non-secret configuration + prerequisite + runtime status:
   "provider": "openai",
   "model": "text-embedding-3-small",
   "dimensions": 1536,
+  "semantic_ratio": 0.25,
   "base_url": null,
   "api_key_configured": true,
   "prerequisite": { "met": true, "autoSummaryEnabled": true, "summaryProvider": "openai", "summaryModel": "gpt-4.1-mini", "reason": null },
@@ -200,15 +201,19 @@ here).
 
 #### PATCH /api/settings/search-embedding
 
-Updates `enabled`, `provider`, `model`, and `dimensions` only — the request
-body has no `base_url` field, so nothing in Semantic Search can set or change
-an endpoint. Enabling (`enabled:"on"`) is rejected with HTTP 400 unless the
+Updates `enabled`, `provider`, `model`, `dimensions`, and `semantic_ratio` —
+the request body has no `base_url` field, so nothing in Semantic Search can
+set or change an endpoint. `semantic_ratio` is the query-time keyword/semantic
+balance (`0`–`1`, default `0.25`); because it never affects stored vectors or
+embedder settings, it is deliberately excluded from the rebuild trigger and
+remains editable while a rebuild is active. An empty string resets it to the
+default. Enabling (`enabled:"on"`) is rejected with HTTP 400 unless the
 prerequisite is met, an OpenAI credential exists (reused `api_key.openai`,
 else the legacy `embedding.api_key` fallback), and the provider/model are set.
-Embedder-relevant changes kick an asynchronous rebuild (never awaited by
-the caller); configuration and credential changes are rejected with HTTP 409
-while a rebuild is active. Disabling rebuilds keyword-only so no embedder is
-left behind.
+Embedder-relevant changes (everything except `semantic_ratio`) kick an
+asynchronous rebuild (never awaited by the caller); configuration and
+credential changes are rejected with HTTP 409 while a rebuild is active.
+Disabling rebuilds keyword-only so no embedder is left behind.
 
 #### POST /api/settings/search-embedding/key
 
