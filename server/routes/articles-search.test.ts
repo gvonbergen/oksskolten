@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { setupTestDb } from '../__tests__/helpers/testDb.js'
 import { buildApp } from '../__tests__/helpers/buildApp.js'
-import { createFeed, insertArticle } from '../db.js'
+import { createFeed, insertArticle, upsertSetting } from '../db.js'
 import type { FastifyInstance } from 'fastify'
 
 vi.mock('../search/sync.js', () => {
@@ -88,6 +88,22 @@ describe('GET /api/articles/search — hybrid semantic + keyword with fallback',
     const [query, opts] = mockSearchWithHybrid.mock.calls[0]
     expect(query).toBe('async task scheduling')
     expect(opts.hybrid).toEqual(expect.objectContaining({ embedder: 'article-v1' }))
+  })
+
+  it('passes the configured semantic ratio and defaults to 0.25 when unset', async () => {
+    seed()
+    mockIsSemanticReady.mockReturnValue(true)
+
+    // Default (no stored setting): the conservative 0.25 balance
+    await app.inject({ method: 'GET', url: '/api/articles/search?q=async+task+scheduling' })
+    let opts = mockSearchWithHybrid.mock.calls[0][1]
+    expect(opts.hybrid).toEqual(expect.objectContaining({ embedder: 'article-v1', semanticRatio: 0.25 }))
+
+    // Configured value is applied to the query verbatim
+    upsertSetting('embedding.semantic_ratio', '0.6')
+    await app.inject({ method: 'GET', url: '/api/articles/search?q=async+task+scheduling' })
+    opts = mockSearchWithHybrid.mock.calls[1][1]
+    expect(opts.hybrid).toEqual(expect.objectContaining({ embedder: 'article-v1', semanticRatio: 0.6 }))
   })
 
   it('returns keyword results with search_mode=keyword-fallback when the embedding fails — never empty', async () => {

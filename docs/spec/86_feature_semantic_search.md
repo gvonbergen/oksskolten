@@ -64,6 +64,7 @@ Stored in the SQLite `settings` table (see [ADR 001](./../adr/001-settings-dual-
 | `embedding.provider` | `openai` (cloud) or `ollama` (local) |
 | `embedding.model` | Provider-specific embedding model (e.g. `text-embedding-3-small`, `nomic-embed-text`) |
 | `embedding.dimensions` | Optional explicit vector dimension (must match model output) |
+| `embedding.semantic_ratio` | Hybrid keyword/semantic balance, `0`–`1` (default `0.25`). Query-time only — never written into the embedder settings, so changing it never triggers a rebuild. Missing, malformed or out-of-range values fall back to the default |
 | `embedding.api_key` | Legacy per-embedding credential; honored only as a fallback when `api_key.openai` is absent. Never exposed to clients |
 
 There is **no** `embedding.base_url`: Semantic Search carries no base-URL
@@ -103,6 +104,8 @@ update).
   articles, waits for tasks (aborting before the swap if a document batch
   failed, e.g. embedding generation failure), swaps atomically, and deletes the
   old index. Concurrent rebuilds are guarded (`rebuilding` flag + HTTP 409).
+  Changing `embedding.semantic_ratio` is deliberately NOT rebuild-worthy: the
+  ratio is applied per query and is editable even while a rebuild runs.
 - **Embedding proxy token.** Meilisearch reaches OpenAI-compatible/Ollama
   endpoints through the app's internal proxy
   (`/api/internal/embedding-proxy/<token>/...`), and the full URL including the
@@ -113,9 +116,13 @@ update).
   token would rewrite the embedder URL on every boot and force a full
   re-embedding.
 - **Query path.** `searchArticlesWithHybrid()` runs the Meilisearch query with
-  `hybrid: { embedder: "article-v1", semanticRatio: 0.25 }` only when
+  `hybrid: { embedder: "article-v1", semanticRatio: <ratio> }` only when
   `isSemanticReady()` — enabled + prerequisite met + provider credential
-  present + live index carries the expected embedder. On a thrown embedding
+  present + live index carries the expected embedder. The ratio is the
+  user-configurable `embedding.semantic_ratio` setting (0–1, default 0.25;
+  malformed/legacy values fall back to the default). It is query-time only —
+  never part of the embedder settings — so changing it applies to new searches
+  immediately and never triggers a rebuild. On a thrown embedding
   error it retries the same query once keyword-only and reports
   `search_mode: "keyword-fallback"` instead of returning empty results.
 - **Readiness.** `semantic_ready` is computed from config + live-index

@@ -16,7 +16,7 @@ import {
 } from '../db.js'
 import { buildMeiliFilter, hasMeaningfulSearchQuery, meiliSearch, searchArticlesWithHybrid } from '../search/client.js'
 import { isSearchReady, isSemanticReady } from '../search/sync.js'
-import { EMBEDDER_NAME, SEMANTIC_RATIO } from '../search/embedding.js'
+import { EMBEDDER_NAME, getSemanticRatio } from '../search/embedding.js'
 import { summarizeArticle, translateArticle } from '../fetcher.js'
 import { getSetting } from '../db/settings.js'
 import { DEFAULT_LANGUAGE } from '../../shared/lang.js'
@@ -93,7 +93,7 @@ const searchArticlesTool: ToolDef = {
       const meiliSort = sort ? [`${sort}:desc`] : undefined
       const hybrid =
         isSemanticReady() && hasMeaningfulSearchQuery(query)
-          ? { embedder: EMBEDDER_NAME, semanticRatio: SEMANTIC_RATIO }
+          ? { embedder: EMBEDDER_NAME, semanticRatio: getSemanticRatio() }
           : undefined
 
       const { hits, searchMode } = await searchArticlesWithHybrid(query, { limit, filter, sort: meiliSort, hybrid })

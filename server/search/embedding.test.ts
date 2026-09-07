@@ -6,7 +6,9 @@ import { upsertSetting, deleteSetting } from '../db.js'
 import {
   EMBEDDER_NAME,
   EMBEDDING_TEMPLATE,
-  SEMANTIC_RATIO,
+  DEFAULT_SEMANTIC_RATIO,
+  EMBEDDING_SETTING_SEMANTIC_RATIO,
+  getSemanticRatio,
   getEmbeddingConfig,
   getSemanticStatus,
   buildEmbeddersSettings,
@@ -494,10 +496,42 @@ describe('testEmbeddingConnection', () => {
   })
 })
 
-// Keep SEMANTIC_RATIO referenced so the constant is exercised (used by routes)
+// Keep the default semantic ratio referenced so the constant is exercised
+// (used as the fallback by getSemanticRatio for every hybrid search entry point)
 describe('query constants', () => {
-  it('uses a conservative semantic ratio for hybrid search', () => {
-    expect(SEMANTIC_RATIO).toBeGreaterThan(0)
-    expect(SEMANTIC_RATIO).toBeLessThan(0.5)
+  it('uses a conservative default semantic ratio for hybrid search', () => {
+    expect(DEFAULT_SEMANTIC_RATIO).toBeGreaterThan(0)
+    expect(DEFAULT_SEMANTIC_RATIO).toBeLessThan(0.5)
+  })
+})
+
+describe('getSemanticRatio', () => {
+  beforeEach(() => {
+    setupTestDb()
+  })
+
+  it('falls back to the default when nothing is stored (fresh install)', () => {
+    expect(getSemanticRatio()).toBe(0.25)
+  })
+
+  it('honors a stored in-range value', () => {
+    upsertSetting(EMBEDDING_SETTING_SEMANTIC_RATIO, '0.6')
+    expect(getSemanticRatio()).toBe(0.6)
+  })
+
+  it('accepts the extremes 0 and 1', () => {
+    upsertSetting(EMBEDDING_SETTING_SEMANTIC_RATIO, '0')
+    expect(getSemanticRatio()).toBe(0)
+    upsertSetting(EMBEDDING_SETTING_SEMANTIC_RATIO, '1')
+    expect(getSemanticRatio()).toBe(1)
+  })
+
+  it('falls back to the default for malformed, legacy or out-of-range values', () => {
+    for (const bad of ['abc', '', ' ', '-0.1', '1.5', '100', 'NaN', 'Infinity']) {
+      upsertSetting(EMBEDDING_SETTING_SEMANTIC_RATIO, bad)
+      expect(getSemanticRatio()).toBe(0.25)
+    }
+    expect(getSemanticRatio(() => undefined)).toBe(0.25)
+    expect(getSemanticRatio(() => 'garbage')).toBe(0.25)
   })
 })

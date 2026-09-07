@@ -409,7 +409,7 @@ The floor is **not applied** in:
 
 When semantic search is configured and healthy (see [86_feature_semantic_search.md](./86_feature_semantic_search.md)),
 searches run as conservative hybrid semantic+keyword retrieval
-(`semanticRatio: 0.25`) over title+summary embeddings with all filters,
+(`semanticRatio: <configured ratio, default 0.25>`) over title+summary embeddings with all filters,
 pagination and sorting preserved. The response additionally carries
 `search_mode`: `"keyword"`, `"hybrid"`, or `"keyword-fallback"` (embedding
 generation failed and the request was retried keyword-only — results are

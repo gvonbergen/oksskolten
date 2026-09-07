@@ -20,6 +20,8 @@ interface EmbeddingStatus {
   provider: EmbeddingProvider | null
   model: string | null
   dimensions: number | null
+  /** Effective hybrid keyword/semantic balance (query-time only). */
+  semantic_ratio: number
   base_url: string | null
   api_key_configured: boolean
   prerequisite: {
@@ -70,12 +72,14 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
   const [provider, setProvider] = useState<EmbeddingProvider | null>(null)
   const [modelInput, setModelInput] = useState('')
   const [dimensionsInput, setDimensionsInput] = useState('')
+  const [ratioInput, setRatioInput] = useState<number | null>(null)
   const [initialized, setInitialized] = useState(false)
   useEffect(() => {
     if (!status || initialized) return
     setProvider(status.provider)
     setModelInput(status.model || '')
     setDimensionsInput(status.dimensions ? String(status.dimensions) : '')
+    setRatioInput(status.semantic_ratio)
     setInitialized(true)
   }, [status, initialized])
 
@@ -137,6 +141,23 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
       setSaving(false)
     }
   }, [saving, provider, modelInput, dimensionsInput, mutate, t])
+
+  // Commit the keyword/semantic balance on slider release (pointer or
+  // keyboard) or blur — query-time only, so no rebuild is involved.
+  const commitRatio = useCallback(async () => {
+    if (saving) return
+    if (ratioInput == null || !status || ratioInput === status.semantic_ratio) return
+    setSaving(true)
+    try {
+      await apiPatch('/api/settings/search-embedding', { semantic_ratio: ratioInput })
+      void mutate()
+      showMessage(t('settings.saved'), 'success')
+    } catch (err: unknown) {
+      showMessage(err instanceof Error ? err.message : 'Save failed', 'error')
+    } finally {
+      setSaving(false)
+    }
+  }, [saving, ratioInput, status, mutate, t])
 
   const handleTest = useCallback(async () => {
     if (testing) return
@@ -233,6 +254,31 @@ export function SemanticSearchSection({ t, settings }: { t: TFunc; settings: Set
             {prerequisiteUnmet && prerequisite?.reason ? ` — ${prerequisite.reason}` : ''}
           </p>
         )}
+      </div>
+
+      {/* Keyword–semantic balance (query-time only, no rebuild required) */}
+      <div>
+        <p className="text-sm text-text mb-1">{t('settings.semanticRatio')}</p>
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={ratioInput ?? 0.25}
+            disabled={saving}
+            aria-label={t('settings.semanticRatio')}
+            onChange={(e) => setRatioInput(Number(e.target.value))}
+            onPointerUp={commitRatio}
+            onKeyUp={commitRatio}
+            onBlur={commitRatio}
+            className="w-56 h-1.5 cursor-pointer accent-accent disabled:opacity-50"
+          />
+          <span aria-live="polite" className="text-xs tabular-nums text-muted w-12 select-none">
+            {Math.round((ratioInput ?? 0.25) * 100)}%
+          </span>
+        </div>
+        <p className="mt-1.5 text-xs text-muted">{t('settings.semanticRatioDesc')}</p>
       </div>
 
       {/* Configuration */}

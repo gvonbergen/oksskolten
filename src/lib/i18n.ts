@@ -520,6 +520,12 @@ const dict = {
   },
   'settings.semanticEnableOn': { ja: 'ON', en: 'ON', zh: 'ON'},
   'settings.semanticEnableOff': { ja: 'OFF', en: 'OFF', zh: 'OFF'},
+  'settings.semanticRatio': { ja: 'キーワードとセマンティックのバランス', en: 'Keyword–semantic balance', zh: '关键词与语义的平衡'},
+  'settings.semanticRatioDesc': {
+    ja: 'ハイブリッド検索で「意味による一致（セマンティック）」と「キーワードの完全一致」のどちらを重視するかを調整します。0% でキーワードのみ、100% で完全にセマンティックです。デフォルトの 25% はキーワード一致を優先しつつ、言い換えられた検索語も拾います。変更は新しい検索から即座に反映され、インデックスの再構築は不要です',
+    en: 'How far hybrid search leans on meaning-based semantic matching versus exact keyword matching. 0% is keyword-only, 100% is fully semantic. The default 25% keeps exact keyword matches dominant while still rescuing paraphrased queries. Changes apply to new searches immediately — no index rebuild needed',
+    zh: '调整混合搜索中基于语义的匹配与精确关键词匹配的比重。0% 表示仅用关键词，100% 表示完全语义。默认 25% 以精确关键词匹配为主，同时仍能召回换一种说法的查询。更改会立即应用于新的搜索，无需重建索引',
+  },
   // Summarization coverage dashboard (auto-summary row)
   'integration.summaryStats': {
     ja: '${summarized} / ${total} 件の記事を要約済み（未要約 ${missing} 件）',

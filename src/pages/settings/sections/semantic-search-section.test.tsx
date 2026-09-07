@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, act } from '@testing-library/react'
 import { SemanticSearchSection } from './semantic-search-section'
 import { apiPatch } from '../../../lib/fetcher'
 
@@ -34,6 +34,7 @@ function baseStatus(overrides: Record<string, unknown> = {}) {
     provider: 'ollama',
     model: 'nomic-embed-text',
     dimensions: null,
+    semantic_ratio: 0.25,
     base_url: null,
     api_key_configured: false,
     prerequisite: { met: true, autoSummaryEnabled: true, summaryProvider: 'ollama', summaryModel: 'llama3.2:latest', reason: null },
@@ -147,5 +148,75 @@ describe('SemanticSearchSection — no base-URL configuration', () => {
     }))
     // No base URL is ever part of the payload.
     expect(JSON.stringify(vi.mocked(apiPatch).mock.calls[0][1])).not.toContain('base_url')
+  })
+})
+
+describe('SemanticSearchSection — keyword/semantic balance (semantic ratio)', () => {
+  function renderSection(overrides: Record<string, unknown> = {}) {
+    swrData['/api/settings/search-embedding'] = baseStatus(overrides)
+    return render(<SemanticSearchSection t={t} settings={{} as never} />)
+  }
+
+  function getRatioSlider() {
+    return screen.getByLabelText('settings.semanticRatio') as HTMLInputElement
+  }
+
+  it('places the balance control directly beneath the semantic search on/off toggle', () => {
+    renderSection({ enabled: 'on' })
+    const toggleLabel = screen.getByText('settings.semanticEnable')
+    const ratioLabel = screen.getByText('settings.semanticRatio')
+    // The ratio label must FOLLOW the toggle label in document order.
+    expect(
+      toggleLabel.compareDocumentPosition(ratioLabel) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it('shows the stored value as a percentage and marks the default', () => {
+    renderSection({ semantic_ratio: 0.6 })
+    expect(getRatioSlider().value).toBe('0.6')
+    expect(screen.getByText('60%')).toBeTruthy()
+    expect(screen.getByText('settings.semanticRatioDesc')).toBeTruthy()
+  })
+
+  it('commits a changed ratio via keyboard interaction (keyup)', async () => {
+    renderSection()
+    const slider = getRatioSlider()
+    fireEvent.change(slider, { target: { value: '0.4' } })
+    expect(screen.getByText('40%')).toBeTruthy()
+    fireEvent.keyUp(slider, { key: 'ArrowRight' })
+    await act(async () => {})
+    expect(apiPatch).toHaveBeenCalledWith('/api/settings/search-embedding', { semantic_ratio: 0.4 })
+  })
+
+  it('commits on pointer release and blur as well', async () => {
+    renderSection()
+    const slider = getRatioSlider()
+    fireEvent.change(slider, { target: { value: '0' } })
+    fireEvent.pointerUp(slider)
+    expect(apiPatch).toHaveBeenCalledWith('/api/settings/search-embedding', { semantic_ratio: 0 })
+
+    // Let the first commit's async handler settle (saving flag clears)
+    await act(async () => {})
+
+    fireEvent.change(slider, { target: { value: '1' } })
+    fireEvent.blur(slider)
+    expect(apiPatch).toHaveBeenCalledWith('/api/settings/search-embedding', { semantic_ratio: 1 })
+  })
+
+  it('does not PATCH when the ratio is unchanged', () => {
+    renderSection({ semantic_ratio: 0.25 })
+    const slider = getRatioSlider()
+    fireEvent.change(slider, { target: { value: '0.25' } })
+    fireEvent.keyUp(slider, { key: 'ArrowRight' })
+    expect(apiPatch).not.toHaveBeenCalled()
+  })
+
+  it('exposes the valid range and step on the slider', () => {
+    renderSection()
+    const slider = getRatioSlider()
+    expect(slider.min).toBe('0')
+    expect(slider.max).toBe('1')
+    expect(slider.step).toBe('0.05')
+    expect(slider.type).toBe('range')
   })
 })
