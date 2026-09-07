@@ -156,7 +156,7 @@ fetchFullText(articleUrl, cleanerConfig?)
 │
 ├─ 1. HTML retrieval [Main Thread]
 │     requires_js_challenge=1 -> retrieve via FlareSolverr
-│     Otherwise -> safeFetch(url), fallback to FlareSolverr on 403
+│     Otherwise -> safeFetch(url), fallback to FlareSolverr on 403 (except SSRF-guard rejections — `Blocked URL: …` errors propagate as-is; never retried via FlareSolverr)
 │
 ├─ 2-6. Delegate to Worker Thread via pool.run() [Worker Thread]
 │
