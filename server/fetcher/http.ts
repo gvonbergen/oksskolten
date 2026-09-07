@@ -1,4 +1,4 @@
-import { safeFetch } from './ssrf.js'
+import { safeFetch, isBlockedUrlError } from './ssrf.js'
 import { fetchViaFlareSolverr } from './flaresolverr.js'
 
 export const USER_AGENT = 'Mozilla/5.0 (compatible; RSSReader/1.0)'
@@ -95,7 +95,9 @@ export async function fetchHtml(url: string, opts?: {
       headers: { 'User-Agent': USER_AGENT },
       signal: AbortSignal.timeout(timeout),
     })
-  } catch {
+  } catch (err) {
+    // SSRF-guard rejection is a security decision — never retry it through FlareSolverr
+    if (isBlockedUrlError(err)) throw err
     // Network-level failure (ECONNRESET, DNS, timeout, etc.) — try FlareSolverr
     const flare = await fetchViaFlareSolverr(url)
     if (!flare) throw new Error('Fetch failed and FlareSolverr unavailable')

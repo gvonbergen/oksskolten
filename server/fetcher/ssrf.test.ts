@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { assertSafeUrl, safeFetch } from './ssrf.js'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { assertSafeUrl, safeFetch, isBlockedUrlError } from './ssrf.js'
 
 // Mock dns lookup
 const mockLookup = vi.fn()
@@ -12,6 +12,103 @@ vi.stubGlobal('fetch', mockFetch)
 beforeEach(() => {
   vi.clearAllMocks()
   mockLookup.mockResolvedValue({ address: '93.184.216.34', family: 4 })
+})
+
+const savedAllowlist = process.env.FEED_URL_ALLOWLIST
+afterEach(() => {
+  if (savedAllowlist === undefined) delete process.env.FEED_URL_ALLOWLIST
+  else process.env.FEED_URL_ALLOWLIST = savedAllowlist
+})
+
+// ---------------------------------------------------------------------------
+// FEED_URL_ALLOWLIST (exact-host opt-out for private-network feed sources)
+// ---------------------------------------------------------------------------
+describe('FEED_URL_ALLOWLIST', () => {
+  it('allows an allowlisted hostname resolving to a private IP (rssify.v7n.ch → 10.8.0.2 shape)', async () => {
+    process.env.FEED_URL_ALLOWLIST = 'rssify.v7n.ch'
+    mockLookup.mockResolvedValue({ address: '10.8.0.2', family: 4 })
+    await expect(assertSafeUrl('https://rssify.v7n.ch/googlenews')).resolves.toBeUndefined()
+  })
+
+  it('does not call DNS for an allowlisted hostname', async () => {
+    process.env.FEED_URL_ALLOWLIST = 'rssify.v7n.ch'
+    mockLookup.mockResolvedValue({ address: '10.8.0.2', family: 4 })
+    await assertSafeUrl('https://rssify.v7n.ch/feed')
+    expect(mockLookup).not.toHaveBeenCalled()
+  })
+
+  it('still blocks a non-listed hostname resolving to a private IP', async () => {
+    process.env.FEED_URL_ALLOWLIST = 'rssify.v7n.ch'
+    mockLookup.mockResolvedValue({ address: '10.8.0.2', family: 4 })
+    await expect(assertSafeUrl('https://intranet.example.com/feed')).rejects.toThrow(
+      'resolves to private IP 10.8.0.2',
+    )
+  })
+
+  it('matches exactly — subdomains of an allowlisted host are NOT allowed', async () => {
+    process.env.FEED_URL_ALLOWLIST = 'rssify.v7n.ch'
+    mockLookup.mockResolvedValue({ address: '10.8.0.2', family: 4 })
+    await expect(assertSafeUrl('https://evil.rssify.v7n.ch/feed')).rejects.toThrow(
+      'resolves to private IP',
+    )
+  })
+
+  it('matches hostnames case-insensitively and tolerates whitespace', async () => {
+    process.env.FEED_URL_ALLOWLIST = ' RSSIFY.V7N.ch , other.host '
+    mockLookup.mockResolvedValue({ address: '192.168.1.5', family: 4 })
+    await expect(assertSafeUrl('https://RSSIFY.v7n.ch/googlenews')).resolves.toBeUndefined()
+  })
+
+  it('explicitly allowlisting a private hostname is honored (operator opt-in)', async () => {
+    process.env.FEED_URL_ALLOWLIST = 'myhost.local'
+    await expect(assertSafeUrl('http://myhost.local/feed')).resolves.toBeUndefined()
+    // …but without the allowlist the same URL is still blocked
+    delete process.env.FEED_URL_ALLOWLIST
+    await expect(assertSafeUrl('http://myhost.local/feed')).rejects.toThrow('private hostname')
+  })
+
+  it('still rejects non-http(s) protocols even for allowlisted hosts', async () => {
+    process.env.FEED_URL_ALLOWLIST = 'rssify.v7n.ch'
+    await expect(assertSafeUrl('file://rssify.v7n.ch/feed')).rejects.toThrow('disallowed protocol')
+  })
+
+  it('still blocks redirects from an allowlisted host to a private IP', async () => {
+    process.env.FEED_URL_ALLOWLIST = 'rssify.v7n.ch'
+    mockFetch.mockResolvedValueOnce(
+      new Response(null, { status: 301, headers: { location: 'http://10.8.0.9/admin' } }),
+    )
+    await expect(safeFetch('https://rssify.v7n.ch/googlenews')).rejects.toThrow('private IP')
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('fetches through safeFetch when allowlisted', async () => {
+    process.env.FEED_URL_ALLOWLIST = 'rssify.v7n.ch'
+    mockLookup.mockResolvedValue({ address: '10.8.0.2', family: 4 })
+    mockFetch.mockResolvedValue(new Response('xml', { status: 200 }))
+    const res = await safeFetch('https://rssify.v7n.ch/googlenews')
+    expect(res.status).toBe(200)
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('is a no-op when FEED_URL_ALLOWLIST is unset', async () => {
+    delete process.env.FEED_URL_ALLOWLIST
+    mockLookup.mockResolvedValue({ address: '10.8.0.2', family: 4 })
+    await expect(assertSafeUrl('https://rssify.v7n.ch/googlenews')).rejects.toThrow(
+      'resolves to private IP 10.8.0.2',
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// BlockedUrlError classification
+// ---------------------------------------------------------------------------
+describe('isBlockedUrlError', () => {
+  it('recognizes Blocked URL errors by message prefix', async () => {
+    const err = new Error('Blocked URL: example.com resolves to private IP 10.0.0.1')
+    expect(isBlockedUrlError(err)).toBe(true)
+    expect(isBlockedUrlError(new Error('ECONNRESET'))).toBe(false)
+    expect(isBlockedUrlError(null)).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------

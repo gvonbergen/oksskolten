@@ -13,6 +13,7 @@ type TranslateFn = ReturnType<typeof useI18n>['t']
 
 /** Map raw server error messages to i18n keys so they render in the user's locale. */
 function localizeServerError(raw: string, t: TranslateFn): string {
+  if (raw.startsWith('Blocked URL:')) return t('modal.errorBlockedPrivate')
   if (raw.includes('RSS could not be detected')) return t('modal.errorRssNotDetected')
   if (raw.includes('Could not extract content')) return t('modal.errorPageExtract')
   if (raw.includes('already exists')) return t('modal.errorAlreadyExists')
