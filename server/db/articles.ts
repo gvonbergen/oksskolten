@@ -14,7 +14,14 @@ export function normalizeUrl(raw: string): string {
   try { return new URL(raw).href } catch { return raw }
 }
 
-function buildMeiliDoc(id: number): MeiliArticleDoc | null {
+/**
+ * Build the full Meilisearch document for one article, with the embedding
+ * `_vectors` policy applied. Exported for regression tests (the `_metadata`
+ * leak guard).
+ */
+export function buildMeiliDoc(id: number): MeiliArticleDoc | null {
+  // libsql 0.5.x appends a `_metadata: { duration }` property to objects
+  // returned by `.get()`; it must not leak into the Meilisearch document.
   const row = getDb().prepare(`
     SELECT a.id, a.feed_id, a.category_id, a.title,
            a.summary,
@@ -28,9 +35,22 @@ function buildMeiliDoc(id: number): MeiliArticleDoc | null {
            (a.liked_at IS NOT NULL) AS is_liked,
            (a.bookmarked_at IS NOT NULL) AS is_bookmarked
     FROM articles a JOIN feeds f ON f.id = a.feed_id WHERE a.id = ?
-  `).get(id) as MeiliArticleDoc | undefined
+  `).get(id) as (MeiliArticleDoc & { _metadata?: unknown }) | undefined
   if (!row) return null
-  return applyEmbeddingVectors(row)
+  return applyEmbeddingVectors(stripMeiliDocMetadata(row))
+}
+
+/**
+ * Strip libsql's `_metadata: { duration }` row-shape artifact from a raw
+ * row before it becomes a Meilisearch document. `.get()` rows carry the
+ * leak (reproduced in the buildMeiliDoc tests); `.all()` rows are clean in
+ * 0.5.x but routing every incremental builder through this helper keeps
+ * the no-`_metadata` document contract on one shared path. Exported for
+ * regression tests.
+ */
+export function stripMeiliDocMetadata<T extends object>(row: T): T {
+  const { _metadata: _libsqlMetadataLeak, ...doc } = row as T & { _metadata?: unknown }
+  return doc as T
 }
 
 // --- Score computation ---

@@ -739,7 +739,12 @@ export async function getSearchIndexRuntime(): Promise<SearchIndexRuntime> {
 
 export function syncArticleToSearch(doc: MeiliArticleDoc): void {
   const config = getEmbeddingConfig()
-  const embeddingDoc = applyEmbeddingVectors(doc, config)
+  // Incremental full-document upserts land on documents that were first
+  // inserted summary-less (explicitly vectorless). Meilisearch only renders
+  // the embedder documentTemplate on fresh adds, so without the regenerate
+  // flag the summary update would silently keep the vectorless state
+  // (keyword-searchable, invisible to semantic search).
+  const embeddingDoc = applyEmbeddingVectors(doc, config, isEmbeddingPrerequisiteMet(), { regenerate: true })
   try {
     const client = getSearchClient()
     const index = client.index(ARTICLES_INDEX)

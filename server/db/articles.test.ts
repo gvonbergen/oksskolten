@@ -16,6 +16,7 @@ import {
   getRetryStats,
 } from '../db.js'
 import { createFeed, createCategory, getDb } from '../db.js'
+import { buildMeiliDoc, stripMeiliDocMetadata } from './articles.js'
 
 beforeEach(() => {
   setupTestDb()
@@ -34,6 +35,65 @@ function seedArticle(feedId: number, overrides: Partial<Parameters<typeof insert
     ...overrides,
   })
 }
+
+// --- buildMeiliDoc: incremental Meilisearch document construction ---
+
+describe('buildMeiliDoc', () => {
+  it('strips the libsql _metadata leak from incrementally built documents', () => {
+    // libsql 0.5.x appends `_metadata: { duration }` to objects returned by
+    // `.get()`; spreading the row would ship that junk field to Meilisearch.
+    const feed = seedFeed()
+    const id = seedArticle(feed.id, { summary: 'A summary' })
+
+    // Sanity: the leak is real in this libsql version, so the guard below is
+    // meaningful and would catch a regression if the stripping is removed.
+    const raw = getDb().prepare('SELECT * FROM articles WHERE id = ?').get(id) as Record<string, unknown>
+    expect(raw).toHaveProperty('_metadata')
+
+    const doc = buildMeiliDoc(id)
+    expect(doc).not.toBeNull()
+    expect(doc).not.toHaveProperty('_metadata')
+    expect(doc!.id).toBe(id)
+    expect(doc!.summary).toBe('A summary')
+  })
+
+  it('contains only intended document fields', () => {
+    const feed = seedFeed()
+    const id = seedArticle(feed.id, { summary: 'A summary' })
+    const doc = buildMeiliDoc(id)
+    const keys = Object.keys(doc!).sort()
+    // `_vectors` is the embedding policy field (null marker here: test DB has
+    // embeddings disabled); `feed_type` comes from the feeds JOIN and gates
+    // clip exclusion. `_metadata` must never appear.
+    expect(keys).toEqual([
+      '_vectors', 'category_id', 'feed_id', 'feed_type', 'full_text',
+      'full_text_translated', 'id', 'is_bookmarked', 'is_liked', 'is_unread',
+      'lang', 'published_at', 'score', 'summary', 'title',
+    ])
+  })
+})
+
+// --- stripMeiliDocMetadata: shared row sanitizer for incremental builders ---
+
+describe('stripMeiliDocMetadata', () => {
+  it('strips the libsql _metadata artifact while preserving document fields', () => {
+    const raw = {
+      id: 7,
+      title: 'T',
+      summary: 'S',
+      score: 3,
+      _metadata: { duration: 2 },
+    }
+    const doc = stripMeiliDocMetadata(raw)
+    expect(doc).toEqual({ id: 7, title: 'T', summary: 'S', score: 3 })
+    expect(doc).not.toHaveProperty('_metadata')
+  })
+
+  it('leaves rows without the artifact untouched', () => {
+    const raw = { id: 1, title: 'T' }
+    expect(stripMeiliDocMetadata(raw)).toEqual({ id: 1, title: 'T' })
+  })
+})
 
 // --- getArticles: read filter and ordering ---
 

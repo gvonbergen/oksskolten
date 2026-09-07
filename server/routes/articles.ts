@@ -24,7 +24,6 @@ import {
   getDb,
   type ArticleDetail,
 } from '../db.js'
-import type { MeiliArticleDoc } from '../search/client.js'
 import { buildMeiliFilter, hasMeaningfulSearchQuery, searchArticlesWithHybrid } from '../search/client.js'
 import { isSearchReady, isSemanticReady, syncArticleToSearch } from '../search/sync.js'
 import { EMBEDDER_NAME, SEMANTIC_RATIO } from '../search/embedding.js'
@@ -33,6 +32,7 @@ import { summarizeArticle, translateArticle, streamSummarizeArticle, streamTrans
 import type { AiTextResult } from '../fetcher.js'
 import { archiveArticleImages, isImageArchivingEnabled, deleteArticleImages } from '../fetcher/article-images.js'
 import { getSetting } from '../db/settings.js'
+import { buildMeiliDoc } from '../db/articles.js'
 import { DEFAULT_LANGUAGE } from '../../shared/lang.js'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -345,17 +345,7 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
           return getArticleById(existing.id)
         })()
         // Sync clip move to Meilisearch (best-effort, outside transaction)
-        const movedDoc = getDb().prepare(`
-          SELECT a.id, a.feed_id, a.category_id, a.title,
-                 a.summary,
-                 f.type AS feed_type,
-                 COALESCE(a.full_text, '') AS full_text,
-                 COALESCE(a.full_text_translated, '') AS full_text_translated,
-                 a.lang,
-                 COALESCE(CAST(strftime('%s', a.published_at) AS INTEGER), 0) AS published_at,
-                 COALESCE(a.score, 0) AS score
-          FROM active_articles a JOIN feeds f ON f.id = a.feed_id WHERE a.id = ?
-        `).get(existing.id) as MeiliArticleDoc | undefined
+        const movedDoc = buildMeiliDoc(existing.id)
         if (movedDoc) syncArticleToSearch(movedDoc)
         reply.status(200).send({ article: moved, moved: true })
         return

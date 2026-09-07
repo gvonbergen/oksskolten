@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setupTestDb } from '../__tests__/helpers/testDb.js'
 import { buildApp } from '../__tests__/helpers/buildApp.js'
 import { createFeed, insertArticle, ensureClipFeed, getArticleById, markImagesArchived, markArticleSeen, upsertSetting } from '../db.js'
+import { buildMeiliDoc } from '../db/articles.js'
 import type { FastifyInstance } from 'fastify'
 import path from 'node:path'
 import os from 'node:os'
@@ -17,6 +18,33 @@ const { mockArchiveArticleImages, mockIsImageArchivingEnabled, mockDeleteArticle
   mockDeleteArticleImages: vi.fn(),
   mockFetchArticleContent: vi.fn(),
 }))
+
+// The whole app is registered, so the search-sync module needs to exist for
+// every consumer (articles routes, db sync helpers...). Mocking it lets the
+// force-move regression test observe the exact document handed to
+// syncArticleToSearch without a running Meilisearch.
+vi.mock('../search/sync.js', () => {
+  return {
+    isSearchReady: vi.fn(() => true),
+    isSemanticReady: vi.fn(() => false),
+    getSearchIndexRuntime: vi.fn(async () => ({ semanticReady: false, rebuilding: false, lastRebuild: null, index: null })),
+    requestSearchRebuild: vi.fn(),
+    isRebuilding: vi.fn(() => false),
+    rebuildSearchIndex: vi.fn(async () => {}),
+    ensureSearchIndex: vi.fn(async () => {}),
+    syncAllScoredArticlesToSearch: vi.fn(async () => 0),
+    syncArticleToSearch: vi.fn(),
+    deleteArticleFromSearch: vi.fn(),
+    deleteArticlesFromSearch: vi.fn(),
+    syncArticleScoreToSearch: vi.fn(),
+    syncArticleFiltersToSearch: vi.fn(),
+    syncArticlesByFeedToSearch: vi.fn(),
+  }
+})
+
+import { syncArticleToSearch } from '../search/sync.js'
+
+const mockSyncArticleToSearch = vi.mocked(syncArticleToSearch)
 
 vi.mock('../fetcher.js', async () => {
   const { EventEmitter } = await import('events')
@@ -247,6 +275,41 @@ describe('POST /api/articles/from-url', () => {
     const moved = getArticleById(artId)
     expect(moved!.feed_id).toBe(clipFeed.id)
     expect(moved!.feed_type).toBe('clip')
+  })
+
+  it('200: force-move syncs a sanitized full document (no libsql _metadata leak)', async () => {
+    ensureClipFeed()
+    const rssFeed = seedFeed()
+    const artId = seedArticle(rssFeed.id, {
+      url: 'https://blog.example.com/to-move-sanitized',
+      summary: 'Summarized before the move',
+    })
+    // Seed-time insertArticle also syncs; isolate the route's move sync below.
+    mockSyncArticleToSearch.mockClear()
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/articles/from-url',
+      headers: json,
+      payload: { url: 'https://blog.example.com/to-move-sanitized', force: true },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(mockSyncArticleToSearch).toHaveBeenCalledTimes(1)
+    const doc = mockSyncArticleToSearch.mock.calls[0][0]
+    // libsql 0.5.x appends `_metadata: { duration }` to `.get()` rows; the raw
+    // row must never reach Meilisearch via syncArticleToSearch.
+    expect(doc).not.toHaveProperty('_metadata')
+    // The moved article syncs exactly the sanitized document the shared
+    // builder produces (feed_type=clip → `_vectors` null marker because clip
+    // articles are never embedded).
+    expect(Object.keys(doc).sort()).toEqual([
+      '_vectors', 'category_id', 'feed_id', 'feed_type', 'full_text',
+      'full_text_translated', 'id', 'is_bookmarked', 'is_liked', 'is_unread',
+      'lang', 'published_at', 'score', 'summary', 'title',
+    ])
+    expect(doc).toEqual(buildMeiliDoc(artId))
+    expect(doc.feed_id).toBe(ensureClipFeed().id)
   })
 
   it('500: force-move fails when clip feed not found', async () => {

@@ -85,10 +85,16 @@ update).
   embedder template `{{doc.title}}\n\n{{doc.summary}}` (keyword
   `searchableAttributes` are unchanged). Articles **without** a summary are
   indexed with `_vectors: { "article-v1": null }`, which makes Meilisearch skip
-  embedding generation for them (verified against the pinned v1.13 image by
+  embedding generation for them (verified against the pinned image by
   `scripts/smoke-embedding.ts`). No embedding is ever generated from a
   title-only article; once `updateArticleContent` writes a summary, the
-  re-upserted RSS document is embedded automatically and idempotently.
+  re-upserted RSS document carries `_vectors: { "article-v1": { regenerate:
+  true } }` so Meilisearch regenerates the vector from the new
+  title+summary template (requires Meilisearch v1.15+, the smallest
+  version whose regenerate renders the incoming document rather than the
+  pre-update one; verified by
+  `scripts/meili-regen-compat-probe.mjs`). Regeneration is idempotent:
+  unchanged text causes no new provider calls.
   Manually clipped (`clip`) articles are intentionally excluded from automatic
   summarization and embeddings in v1, including after a manual summary.
 - **Staging rebuild.** Enabling, disabling, or changing provider/model/
