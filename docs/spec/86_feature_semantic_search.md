@@ -64,6 +64,7 @@ Stored in the SQLite `settings` table (see [ADR 001](./../adr/001-settings-dual-
 | `embedding.provider` | `openai` (cloud) or `ollama` (local) |
 | `embedding.model` | Provider-specific embedding model (e.g. `text-embedding-3-small`, `nomic-embed-text`) |
 | `embedding.dimensions` | Optional explicit vector dimension (must match model output) |
+| `embedding.semantic_ratio` | Hybrid keyword/semantic balance, `0`–`1` (default `0.25`). Query-time only — never written into the embedder settings, so changing it never triggers a rebuild. Missing, malformed or out-of-range values fall back to the default |
 | `embedding.api_key` | Legacy per-embedding credential; honored only as a fallback when `api_key.openai` is absent. Never exposed to clients |
 
 There is **no** `embedding.base_url`: Semantic Search carries no base-URL
@@ -103,6 +104,8 @@ update).
   articles, waits for tasks (aborting before the swap if a document batch
   failed, e.g. embedding generation failure), swaps atomically, and deletes the
   old index. Concurrent rebuilds are guarded (`rebuilding` flag + HTTP 409).
+  Changing `embedding.semantic_ratio` is deliberately NOT rebuild-worthy: the
+  ratio is applied per query and is editable even while a rebuild runs.
 - **Embedding proxy token.** Meilisearch reaches OpenAI-compatible/Ollama
   endpoints through the app's internal proxy
   (`/api/internal/embedding-proxy/<token>/...`), and the full URL including the
@@ -113,9 +116,13 @@ update).
   token would rewrite the embedder URL on every boot and force a full
   re-embedding.
 - **Query path.** `searchArticlesWithHybrid()` runs the Meilisearch query with
-  `hybrid: { embedder: "article-v1", semanticRatio: 0.25 }` only when
+  `hybrid: { embedder: "article-v1", semanticRatio: <ratio> }` only when
   `isSemanticReady()` — enabled + prerequisite met + provider credential
-  present + live index carries the expected embedder. On a thrown embedding
+  present + live index carries the expected embedder. The ratio is the
+  user-configurable `embedding.semantic_ratio` setting (0–1, default 0.25;
+  malformed/legacy values fall back to the default). It is query-time only —
+  never part of the embedder settings — so changing it applies to new searches
+  immediately and never triggers a rebuild. On a thrown embedding
   error it retries the same query once keyword-only and reports
   `search_mode: "keyword-fallback"` instead of returning empty results.
 - **Readiness.** `semantic_ready` is computed from config + live-index
@@ -176,6 +183,7 @@ Non-secret configuration + prerequisite + runtime status:
   "provider": "openai",
   "model": "text-embedding-3-small",
   "dimensions": 1536,
+  "semantic_ratio": 0.25,
   "base_url": null,
   "api_key_configured": true,
   "prerequisite": { "met": true, "autoSummaryEnabled": true, "summaryProvider": "openai", "summaryModel": "gpt-4.1-mini", "reason": null },
@@ -193,15 +201,19 @@ here).
 
 #### PATCH /api/settings/search-embedding
 
-Updates `enabled`, `provider`, `model`, and `dimensions` only — the request
-body has no `base_url` field, so nothing in Semantic Search can set or change
-an endpoint. Enabling (`enabled:"on"`) is rejected with HTTP 400 unless the
+Updates `enabled`, `provider`, `model`, `dimensions`, and `semantic_ratio` —
+the request body has no `base_url` field, so nothing in Semantic Search can
+set or change an endpoint. `semantic_ratio` is the query-time keyword/semantic
+balance (`0`–`1`, default `0.25`); because it never affects stored vectors or
+embedder settings, it is deliberately excluded from the rebuild trigger and
+remains editable while a rebuild is active. An empty string resets it to the
+default. Enabling (`enabled:"on"`) is rejected with HTTP 400 unless the
 prerequisite is met, an OpenAI credential exists (reused `api_key.openai`,
 else the legacy `embedding.api_key` fallback), and the provider/model are set.
-Embedder-relevant changes kick an asynchronous rebuild (never awaited by
-the caller); configuration and credential changes are rejected with HTTP 409
-while a rebuild is active. Disabling rebuilds keyword-only so no embedder is
-left behind.
+Embedder-relevant changes (everything except `semantic_ratio`) kick an
+asynchronous rebuild (never awaited by the caller); configuration and
+credential changes are rejected with HTTP 409 while a rebuild is active.
+Disabling rebuilds keyword-only so no embedder is left behind.
 
 #### POST /api/settings/search-embedding/key
 

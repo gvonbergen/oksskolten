@@ -11,8 +11,10 @@ import {
   EMBEDDING_SETTING_PROVIDER,
   EMBEDDING_SETTING_MODEL,
   EMBEDDING_SETTING_DIMENSIONS,
+  EMBEDDING_SETTING_SEMANTIC_RATIO,
   EMBEDDING_SETTING_API_KEY,
   getEmbeddingConfig,
+  getSemanticRatio,
   getEmbeddingPrerequisite,
   getSemanticStatus,
   resolveEmbeddingConnection,
@@ -30,6 +32,20 @@ const EmbeddingPatchBody = z.object({
     .union([
       z.coerce.number().int('dimensions must be an integer').min(1, 'dimensions must be 1-8192').max(8192),
       z.literal(''),
+    ])
+    .optional(),
+  // Hybrid keyword/semantic balance, 0-1. Query-time only: persisted here
+  // but never written into the embedder settings, so it never triggers a
+  // rebuild. Empty string resets to the built-in default.
+  semantic_ratio: z
+    .union([
+      // `''` (reset to default) must win over the numeric coercion of the
+      // empty string, which would otherwise parse as 0.
+      z.literal(''),
+      z.coerce
+        .number()
+        .min(0, 'semantic_ratio must be between 0 and 1')
+        .max(1, 'semantic_ratio must be between 0 and 1'),
     ])
     .optional(),
 })
@@ -71,6 +87,7 @@ function jsonStatus() {
     provider: status.config.provider,
     model: status.config.model,
     dimensions: status.config.dimensions,
+    semantic_ratio: status.config.semanticRatio,
     base_url: status.config.baseUrl,
     api_key_configured: status.config.apiKeyConfigured,
     prerequisite: status.prerequisite,
@@ -116,6 +133,12 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
       const dimensionsChanged = nextDimensions !== current.dimensions
       const modelWasChanged = modelChanged(body, current)
       const configChanged = enabledChanged || providerChanged || modelWasChanged || dimensionsChanged
+
+      // The semantic ratio is query-time only and never changes the stored
+      // vectors or the embedder settings, so it is deliberately excluded
+      // from `configChanged`: no rebuild, and it stays editable while a
+      // rebuild is running.
+      const ratioChanged = body.semantic_ratio !== undefined && body.semantic_ratio !== getSemanticRatio()
 
       if (isRebuilding() && configChanged) {
         reply.status(409).send({ error: 'An index rebuild is already in progress; retry this configuration change when it finishes' })
@@ -163,6 +186,12 @@ export async function searchEmbeddingRoutes(api: FastifyInstance): Promise<void>
         if (nextDimensions === null) deleteSetting(EMBEDDING_SETTING_DIMENSIONS)
         else upsertSetting(EMBEDDING_SETTING_DIMENSIONS, String(nextDimensions))
         embedderRelevant.push('dimensions')
+      }
+      if (ratioChanged) {
+        // `''` resets to the built-in default by removing the stored value;
+        // any other validated number in [0, 1] is persisted as-is.
+        if (body.semantic_ratio === '') deleteSetting(EMBEDDING_SETTING_SEMANTIC_RATIO)
+        else upsertSetting(EMBEDDING_SETTING_SEMANTIC_RATIO, String(body.semantic_ratio))
       }
 
       // Connection settings live only in AI Providers now: a stale

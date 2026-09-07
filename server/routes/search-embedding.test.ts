@@ -95,6 +95,15 @@ describe('GET /api/settings/search-embedding', () => {
     expect(body.semantic_ready).toBe(true)
     expect(res.body).not.toContain('sk-never-return-this')
   })
+
+  it('reports the effective semantic ratio: default when unset, stored value when set', async () => {
+    const resDefault = await app.inject({ method: 'GET', url: '/api/settings/search-embedding' })
+    expect(resDefault.json().semantic_ratio).toBe(0.25)
+
+    upsertSetting('embedding.semantic_ratio', '0.7')
+    const resStored = await app.inject({ method: 'GET', url: '/api/settings/search-embedding' })
+    expect(resStored.json().semantic_ratio).toBe(0.7)
+  })
 })
 
 describe('PATCH /api/settings/search-embedding', () => {
@@ -191,6 +200,58 @@ describe('PATCH /api/settings/search-embedding', () => {
     const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { model: 'text-embedding-3-large' }, headers: json })
     expect(res.statusCode).toBe(409)
     expect(getSetting('embedding.model')).toBe('text-embedding-3-small')
+    expect(mockRequestRebuild).not.toHaveBeenCalled()
+  })
+
+  it('persists the semantic ratio without triggering a rebuild', async () => {
+    const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { semantic_ratio: 0.6 }, headers: json })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().semantic_ratio).toBe(0.6)
+    expect(getSetting('embedding.semantic_ratio')).toBe('0.6')
+    expect(mockRequestRebuild).not.toHaveBeenCalled()
+  })
+
+  it('re-persisting the default ratio is a no-op and never rebuilds', async () => {
+    const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { semantic_ratio: 0.25 }, headers: json })
+    expect(res.statusCode).toBe(200)
+    expect(getSetting('embedding.semantic_ratio')).toBeUndefined()
+    expect(mockRequestRebuild).not.toHaveBeenCalled()
+  })
+
+  it('empty semantic_ratio resets to the built-in default', async () => {
+    upsertSetting('embedding.semantic_ratio', '0.9')
+    const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { semantic_ratio: '' }, headers: json })
+    expect(res.statusCode).toBe(200)
+    expect(getSetting('embedding.semantic_ratio')).toBeUndefined()
+    expect(res.json().semantic_ratio).toBe(0.25)
+    expect(mockRequestRebuild).not.toHaveBeenCalled()
+  })
+
+  it('rejects out-of-range and malformed semantic ratios', async () => {
+    for (const bad of [-0.1, 1.5, 2, 'abc']) {
+      const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { semantic_ratio: bad }, headers: json })
+      expect(res.statusCode).toBe(400)
+    }
+    // Nothing was persisted and no rebuild was scheduled
+    expect(getSetting('embedding.semantic_ratio')).toBeUndefined()
+    expect(mockRequestRebuild).not.toHaveBeenCalled()
+  })
+
+  it('accepts the extreme ratios 0 and 1 without a rebuild', async () => {
+    let res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { semantic_ratio: 0 }, headers: json })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().semantic_ratio).toBe(0)
+    res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { semantic_ratio: 1 }, headers: json })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().semantic_ratio).toBe(1)
+    expect(mockRequestRebuild).not.toHaveBeenCalled()
+  })
+
+  it('stays editable during an active rebuild (query-time only, no 409)', async () => {
+    mockIsRebuilding.mockReturnValueOnce(true)
+    const res = await app.inject({ method: 'PATCH', url: '/api/settings/search-embedding', payload: { semantic_ratio: 0.4 }, headers: json })
+    expect(res.statusCode).toBe(200)
+    expect(getSetting('embedding.semantic_ratio')).toBe('0.4')
     expect(mockRequestRebuild).not.toHaveBeenCalled()
   })
 

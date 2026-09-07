@@ -36,9 +36,12 @@ export const EMBEDDING_TEMPLATE = '{{doc.title}}\n\n{{doc.summary}}'
 
 /**
  * Conservative hybrid balance: keyword dominance for exact names, acronyms
- * and quoted terms, while rescuing conceptual / paraphrased queries.
+ * and quoted terms, while rescuing conceptual / paraphrased queries. The
+ * default for the user-configurable `embedding.semantic_ratio` setting —
+ * a query-time-only knob that never affects stored vectors or the index
+ * configuration, so changing it never triggers a rebuild.
  */
-export const SEMANTIC_RATIO = 0.25
+export const DEFAULT_SEMANTIC_RATIO = 0.25
 
 export {
   EMBEDDING_PROVIDERS,
@@ -54,6 +57,8 @@ export const EMBEDDING_SETTING_ENABLED = 'embedding.enabled'
 export const EMBEDDING_SETTING_PROVIDER = 'embedding.provider'
 export const EMBEDDING_SETTING_MODEL = 'embedding.model'
 export const EMBEDDING_SETTING_DIMENSIONS = 'embedding.dimensions'
+/** Hybrid query-time keyword/semantic balance, 0–1 (search-time only). */
+export const EMBEDDING_SETTING_SEMANTIC_RATIO = 'embedding.semantic_ratio'
 /**
  * Legacy per-embedding credential (PR 1). Embeddings now reuse
  * `api_key.openai` from the LLM provider section; a stored value here is
@@ -62,6 +67,23 @@ export const EMBEDDING_SETTING_DIMENSIONS = 'embedding.dimensions'
 export const EMBEDDING_SETTING_API_KEY = 'embedding.api_key'
 
 // --- Config ---
+
+/**
+ * Resolve the effective hybrid `semanticRatio` from the settings table.
+ * Search-time only: the value is applied per query and never written into
+ * the Meilisearch embedder settings, so a change does not require a
+ * rebuild. Missing, malformed or legacy out-of-range values fall back to
+ * `DEFAULT_SEMANTIC_RATIO` (0.25) so a bad row can never break search.
+ */
+export function getSemanticRatio(
+  readSetting: (key: string) => string | null | undefined = getSetting,
+): number {
+  const raw = readSetting(EMBEDDING_SETTING_SEMANTIC_RATIO)
+  if (raw == null) return DEFAULT_SEMANTIC_RATIO
+  const parsed = Number(raw.trim())
+  if (raw.trim() === '' || !Number.isFinite(parsed) || parsed < 0 || parsed > 1) return DEFAULT_SEMANTIC_RATIO
+  return parsed
+}
 
 export interface EmbeddingConfig {
   enabled: boolean
@@ -370,6 +392,8 @@ export interface SemanticRuntimeStatus {
     provider: EmbeddingProvider | null
     model: string | null
     dimensions: number | null
+    /** Effective hybrid keyword/semantic balance (query-time only). */
+    semanticRatio: number
     baseUrl: string | null
     apiKeyConfigured: boolean
   }
@@ -385,6 +409,7 @@ export function getSemanticStatus(): SemanticRuntimeStatus {
       provider: config.provider,
       model: config.model,
       dimensions: config.dimensions,
+      semanticRatio: getSemanticRatio(),
       baseUrl: config.baseUrl,
       apiKeyConfigured: !!config.apiKey,
     },

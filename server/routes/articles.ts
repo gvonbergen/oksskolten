@@ -26,7 +26,7 @@ import {
 } from '../db.js'
 import { buildMeiliFilter, hasMeaningfulSearchQuery, searchArticlesWithHybrid } from '../search/client.js'
 import { isSearchReady, isSemanticReady, syncArticleToSearch } from '../search/sync.js'
-import { EMBEDDER_NAME, SEMANTIC_RATIO } from '../search/embedding.js'
+import { EMBEDDER_NAME, getSemanticRatio } from '../search/embedding.js'
 import { requireJson } from '../auth.js'
 import { summarizeArticle, translateArticle, streamSummarizeArticle, streamTranslateArticle, fetchArticleContent } from '../fetcher.js'
 import type { AiTextResult } from '../fetcher.js'
@@ -273,7 +273,7 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
       // is reported via search_mode instead of returning empty results.
       const hybrid =
         isSemanticReady() && hasMeaningfulSearchQuery(query.q)
-          ? { embedder: EMBEDDER_NAME, semanticRatio: SEMANTIC_RATIO }
+          ? { embedder: EMBEDDER_NAME, semanticRatio: getSemanticRatio() }
           : undefined
       const { hits, estimatedTotalHits, searchMode } = await searchArticlesWithHybrid(query.q, {
         limit,
