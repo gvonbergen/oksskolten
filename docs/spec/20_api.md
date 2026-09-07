@@ -682,6 +682,7 @@ data: {"type":"done","feed":{"id":1,"name":"...","rss_url":"...","rss_bridge_url
 
 Step names: `rss-discovery`, `flaresolverr` (conditional), `rss-bridge`, `css-selector`
 Statuses: `pending`, `running`, `done`, `skipped`
+An `error` event (`{"type":"error","error":"…"}`) ends the stream: if the SSRF guard rejects the URL (e.g. it resolves to a private IP), the real reason is surfaced immediately (`Blocked URL: … resolves to a private IP …`) and FlareSolverr / RSS Bridge / CSS selector fallbacks are *not* attempted.
 The `flaresolverr` step is a child step of RSS discovery and is displayed hierarchically in the UI. It does not appear under normal conditions (when bot auth is not needed).
 
 **Two-phase choice flow**: When Step 1 finds an RSS feed, the server sends a `choice_needed` event and ends the SSE stream without creating a feed:

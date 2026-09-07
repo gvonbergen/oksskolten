@@ -3,7 +3,7 @@ import { JSDOM } from 'jsdom'
 import type { Feed } from '../db.js'
 import { normalizeDate } from './util.js'
 import { fetchHtml, decodeResponse, USER_AGENT, DEFAULT_TIMEOUT, DISCOVERY_TIMEOUT, PROBE_TIMEOUT } from './http.js'
-import { safeFetch } from './ssrf.js'
+import { safeFetch, isBlockedUrlError } from './ssrf.js'
 import { fetchViaFlareSolverr } from './flaresolverr.js'
 import { parseHttpCacheInterval, parseRssTtl } from './schedule.js'
 import { cleanUrl } from './url-cleaner.js'
@@ -206,6 +206,7 @@ export async function fetchAndParseRss(feed: Feed, opts?: { skipCache?: boolean 
           xml = await decodeResponse(res)
         }
       } catch (err) {
+        if (isBlockedUrlError(err)) throw err
         if (isCssBridge) {
           const items = cleanItems(assignCssBridgePseudoDates(await fetchCssSelectorViaFlareSolverr(rssUrl), rssUrl))
           return { items, notModified: false, etag: null, lastModified: null, contentHash: null, httpCacheSeconds: null, rssTtlSeconds: null }
@@ -449,7 +450,9 @@ export async function discoverRssUrl(blogUrl: string, callbacks?: DiscoverCallba
     }
 
     if (result.usedFlareSolverr) callbacks?.onFlareSolverr?.('done', !!rssUrl)
-  } catch {
+  } catch (err) {
+    // SSRF-guard rejection is a security decision — surface it, do not keep probing
+    if (isBlockedUrlError(err)) throw err
     // Page fetch failed, continue to path probing
   }
 

@@ -180,6 +180,7 @@ const dict = {
   'modal.adding': { ja: '追加中...', en: 'Adding...', zh: '添加中...'},
   'modal.add': { ja: '追加', en: 'Add', zh: '添加'},
   'modal.errorRssNotDetected': { ja: 'このURLからRSSフィードを検出できませんでした', en: 'RSS could not be detected for this URL', zh: '无法从此 URL 检测到 RSS'},
+  'modal.errorBlockedPrivate': { ja: 'セキュリティ保護のため、このURLはブロックされました（プライベート/内部アドレスに解決されます）。自己ホスト型のフィードは FEED_URL_ALLOWLIST で許可できます', en: 'This URL was blocked for security reasons: it resolves to a private/internal address. Self-hosted feeds can be allowed via the FEED_URL_ALLOWLIST setting', zh: '出于安全原因，此 URL 已被阻止：它解析为私有/内部地址。自托管订阅源可通过 FEED_URL_ALLOWLIST 设置允许'},
   'modal.errorAlreadyExists': { ja: 'このフィードは既に登録されています', en: 'This feed already exists', zh: '此订阅源已存在'},
   'modal.errorHttpOrHttpsOnly': { ja: 'http:// または https:// で始まるURLのみ対応しています', en: 'Only http:// or https:// URLs are allowed', zh: '仅支持以 http:// 或 https:// 开头的 URL'},
   'modal.genericError': { ja: 'エラーが発生しました', en: 'An error occurred', zh: '发生错误'},

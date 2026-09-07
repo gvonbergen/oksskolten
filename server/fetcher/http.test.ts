@@ -11,6 +11,8 @@ const { mockSafeFetch, mockFetchViaFlareSolverr } = vi.hoisted(() => ({
 
 vi.mock('./ssrf.js', () => ({
   safeFetch: (...args: unknown[]) => mockSafeFetch(...args),
+  isBlockedUrlError: (err: unknown) =>
+    err instanceof Error && err.message.startsWith('Blocked URL:'),
 }))
 
 vi.mock('./flaresolverr.js', () => ({
@@ -78,7 +80,6 @@ describe('fetchHtml', () => {
       body: '<html>flare</html>',
       contentType: 'text/html',
     })
-
     const result = await fetchHtml('https://example.com')
     expect(result.html).toBe('<html>flare</html>')
     expect(result.usedFlareSolverr).toBe(true)
@@ -89,6 +90,15 @@ describe('fetchHtml', () => {
     mockFetchViaFlareSolverr.mockResolvedValue(null)
 
     await expect(fetchHtml('https://example.com')).rejects.toThrow('HTTP 500')
+  })
+
+  it('rethrows SSRF block errors without retrying via FlareSolverr', async () => {
+    mockSafeFetch.mockRejectedValue(new Error('Blocked URL: rssify.v7n.ch resolves to private IP 10.8.0.2'))
+
+    await expect(fetchHtml('https://rssify.v7n.ch/googlenews')).rejects.toThrow(
+      'Blocked URL: rssify.v7n.ch resolves to private IP 10.8.0.2',
+    )
+    expect(mockFetchViaFlareSolverr).not.toHaveBeenCalled()
   })
 
   it('goes straight to FlareSolverr when useFlareSolverr option is set', async () => {

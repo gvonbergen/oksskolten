@@ -9,6 +9,8 @@ import { fetchAndParseRss, discoverRssUrl, RateLimitError } from './rss.js'
 const mockSafeFetch = vi.fn()
 vi.mock('./ssrf.js', () => ({
   safeFetch: (...args: unknown[]) => mockSafeFetch(...args),
+  isBlockedUrlError: (err: unknown) =>
+    err instanceof Error && err.message.startsWith('Blocked URL:'),
 }))
 
 // Controllable feedsmith mock — set feedsmithShouldFail = true to force fast-xml-parser fallback

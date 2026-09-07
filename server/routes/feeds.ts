@@ -23,6 +23,7 @@ import {
 } from '../db.js'
 import { requireJson } from '../auth.js'
 import { fetchSingleFeed, discoverRssUrl } from '../fetcher.js'
+import { isBlockedUrlError } from '../fetcher/ssrf.js'
 import { queryRssBridge, inferCssSelectorBridge } from '../rss-bridge.js'
 import { parseOpml, generateOpml } from '../opml.js'
 import { NumericIdParams, parseOrBadRequest } from '../lib/validation.js'
@@ -129,7 +130,14 @@ export async function feedRoutes(api: FastifyInstance): Promise<void> {
             discoveredTitle = result.title
             if (result.usedFlareSolverr) requiresJsChallenge = true
             send({ type: 'step', step: 'rss-discovery', status: 'done', found: !!rssUrl })
-          } catch {
+          } catch (err) {
+            if (err instanceof Error && isBlockedUrlError(err)) {
+              // SSRF-guard rejection: surface the real reason instead of the
+              // generic "RSS could not be detected" and do not keep probing.
+              send({ type: 'error', error: err.message })
+              sse.end()
+              return
+            }
             send({ type: 'step', step: 'rss-discovery', status: 'done', found: false })
           }
 

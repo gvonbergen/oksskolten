@@ -266,6 +266,29 @@ describe('POST /api/feeds — RSS discovery pipeline', () => {
     expect(hasErrorOrDone).toBe(true)
   })
 
+  it('surfaces SSRF block errors immediately instead of masking them', async () => {
+    // Discovery hit the SSRF guard (e.g. private-IP DNS resolution) — the real
+    // reason must reach the user, and bridge/CSS-selector must not be tried.
+    mockDiscoverRssUrl.mockRejectedValue(
+      new Error('Blocked URL: rssify.v7n.ch resolves to private IP 10.8.0.2'),
+    )
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/feeds',
+      headers: json,
+      payload: { url: 'https://rssify.v7n.ch/googlenews' },
+    })
+
+    const events = parseSSE(res.body)
+    const error = events.find(e => e.type === 'error') as { error?: string } | undefined
+    expect(error?.error).toBe('Blocked URL: rssify.v7n.ch resolves to private IP 10.8.0.2')
+    expect(mockQueryRssBridge).not.toHaveBeenCalled()
+    expect(mockInferCssSelectorBridge).not.toHaveBeenCalled()
+    // No feed persisted: neither choice_needed (phase 2 offer) nor done (created)
+    expect(events.some(e => e.type === 'choice_needed' || e.type === 'done')).toBe(false)
+  })
+
   it('accepts http:// URLs', async () => {
     const res = await app.inject({
       method: 'POST',
