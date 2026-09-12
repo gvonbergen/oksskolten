@@ -34,7 +34,7 @@ export function buildMeiliDoc(id: number): MeiliArticleDoc | null {
            (a.seen_at IS NULL) AS is_unread,
            (a.liked_at IS NOT NULL) AS is_liked,
            (a.bookmarked_at IS NOT NULL) AS is_bookmarked
-    FROM articles a JOIN feeds f ON f.id = a.feed_id WHERE a.id = ?
+    FROM articles a JOIN feeds f ON f.id = a.feed_id WHERE a.id = ? AND a.hidden_at IS NULL
   `).get(id) as (MeiliArticleDoc & { _metadata?: unknown }) | undefined
   if (!row) return null
   return applyEmbeddingVectors(stripMeiliDocMetadata(row))

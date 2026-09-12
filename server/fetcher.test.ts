@@ -3200,6 +3200,34 @@ describe('redownloadArticle', () => {
     expect(row.last_error).toBe('redownload: no usable content extracted')
   })
 
+  it('replaces content for short genuine articles', async () => {
+    const redownloadArticle = await importRedownload()
+    const feed = seedFeed()
+    const shortBody = '<p>Short but genuine post prose.</p>'
+    mockFetch.mockImplementation((url: string | URL) => {
+      if (url.toString() === 'https://example.com/short-genuine') return Promise.resolve(mockResponse(articleHtml({ title: 'Short Genuine', body: shortBody })))
+      return Promise.resolve(mockResponse('', { status: 404 }))
+    })
+
+    const id = insertArticle({
+      feed_id: feed.id,
+      title: 'Short Genuine',
+      url: 'https://example.com/short-genuine',
+      published_at: '2024-01-01T00:00:00Z',
+      lang: 'en',
+      full_text: 'previously stored longer content',
+      summary: 'old summary',
+    })
+
+    const result = await redownloadArticle(id)
+    expect(result).toBe(true)
+
+    const row = getDb().prepare('SELECT full_text, summary, last_error FROM articles WHERE id = ?').get(id) as { full_text: string; summary: string | null; last_error: string | null }
+    expect(row.full_text).toContain('Short but genuine post prose')
+    expect(row.summary).toBeNull()
+    expect(row.last_error).toBeNull()
+  })
+
   it('runs auto-summarization after a successful redownload when summary.auto is on', async () => {
     const redownloadArticle = await importRedownload()
     const feed = seedFeed()

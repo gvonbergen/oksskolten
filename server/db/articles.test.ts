@@ -920,6 +920,19 @@ describe('hideArticle', () => {
     expect(hideArticle(999999)).toBe(false)
   })
 
+  it('stops rendering a Meilisearch document once hidden', () => {
+    const feed = seedFeed()
+    const id = seedArticle(feed.id, { url: 'https://example.com/hide-search', full_text: 'Body text', summary: 'A summary' })
+
+    expect(buildMeiliDoc(id)).not.toBeNull()
+    hideArticle(id)
+    expect(buildMeiliDoc(id)).toBeNull()
+    // Post-hide content updates must stay a search-index no-op: the
+    // updateArticleContent sync is gated on buildMeiliDoc returning a doc.
+    updateArticleContent(id, { summary: 'Updated after hide' })
+    expect(buildMeiliDoc(id)).toBeNull()
+  })
+
   it('excludes hidden articles from the stale-refresh maintenance scans', () => {
     const feed = seedFeed()
     const visibleShort = seedArticle(feed.id, { url: 'https://example.com/visible-short', full_text: 'tiny' })
