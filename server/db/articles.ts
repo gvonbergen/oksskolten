@@ -262,6 +262,38 @@ export function getArticleByUrl(url: string): ArticleDetail | undefined {
   return undefined
 }
 
+export function getHiddenArticleByUrl(url: string): { id: number } | undefined {
+  const db = getDb()
+  const normalized = normalizeUrl(url)
+  const stmt = db.prepare(`
+    SELECT a.id
+    FROM articles a
+    WHERE a.url = ? AND a.hidden_at IS NOT NULL AND a.purged_at IS NULL
+  `)
+
+  const row = stmt.get(normalized) as { id: number } | undefined
+  if (row) return row
+
+  // Protocol fallback (mirror getArticleByUrl): cover the transition period
+  // where some articles were saved under the other protocol.
+  let fallbackUrl: string | null = null
+  if (normalized.startsWith('https://')) {
+    fallbackUrl = 'http://' + normalized.slice(8)
+  } else if (normalized.startsWith('http://')) {
+    fallbackUrl = 'https://' + normalized.slice(7)
+  }
+  if (fallbackUrl) {
+    return stmt.get(fallbackUrl) as { id: number } | undefined
+  }
+
+  return undefined
+}
+
+export function getArticleRssExcerpt(id: number): string | null {
+  const row = getDb().prepare('SELECT rss_excerpt FROM articles WHERE id = ?').get(id) as { rss_excerpt: string | null } | undefined
+  return row?.rss_excerpt ?? null
+}
+
 export function getArticleById(id: number): ArticleDetail | undefined {
   return getDb().prepare(`
     SELECT a.id, a.feed_id, f.name AS feed_name, f.type AS feed_type,
@@ -394,10 +426,12 @@ export function insertArticle(data: {
   excerpt?: string | null
   og_image?: string | null
   last_error?: string | null
+  /** Original RSS listing excerpt, persisted at ingestion for deterministic redownloads */
+  rss_excerpt?: string | null
 }): number {
   const info = runNamed(`
-    INSERT INTO articles (feed_id, category_id, title, url, published_at, lang, full_text, full_text_translated, translated_lang, summary, excerpt, og_image, last_error)
-    VALUES (@feed_id, (SELECT category_id FROM feeds WHERE id = @feed_id), @title, @url, @published_at, @lang, @full_text, @full_text_translated, @translated_lang, @summary, @excerpt, @og_image, @last_error)
+    INSERT INTO articles (feed_id, category_id, title, url, published_at, lang, full_text, full_text_translated, translated_lang, summary, excerpt, og_image, last_error, rss_excerpt)
+    VALUES (@feed_id, (SELECT category_id FROM feeds WHERE id = @feed_id), @title, @url, @published_at, @lang, @full_text, @full_text_translated, @translated_lang, @summary, @excerpt, @og_image, @last_error, @rss_excerpt)
   `, {
     feed_id: data.feed_id,
     title: data.title,
@@ -411,6 +445,7 @@ export function insertArticle(data: {
     excerpt: data.excerpt ?? null,
     og_image: data.og_image ?? null,
     last_error: data.last_error ?? null,
+    rss_excerpt: data.rss_excerpt ?? null,
   })
   const articleId = info.lastInsertRowid as number
   const doc = buildMeiliDoc(articleId)

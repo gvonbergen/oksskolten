@@ -6,6 +6,7 @@ import {
   getExistingArticleUrls,
   getRetryArticles,
   getRetryStats,
+  getArticleRssExcerpt,
   insertArticle,
   markArticleRefreshAttempted,
   normalizeUrl,
@@ -223,6 +224,9 @@ async function processArticle(task: ArticleTask): Promise<boolean> {
         excerpt: content.excerpt,
         og_image: content.ogImage,
         last_error: content.lastError,
+        // Keep the original listing excerpt so a later redownload can re-run
+        // the RSS fallback even after the item leaves the live feed.
+        rss_excerpt: task.excerpt ?? null,
       })
       // Fire-and-forget: detect similar articles asynchronously
       void detectAndStoreSimilarArticles(articleId, task.title, task.feed_id, task.published_at)
@@ -276,11 +280,18 @@ export async function redownloadArticle(articleId: number): Promise<boolean> {
   if (!article) return false
   log.info({ articleId, url: article.url }, 'redownload: force-fetching article content')
 
+  // A redownload that loses the live page must fall back to the same RSS
+  // listing content the item was ingested from, so the operation is
+  // deterministic even after the item rolls off the feed.
+  const storedExcerpt = getArticleRssExcerpt(articleId)
+
   // No `existingArticle` passed on purpose: that would skip the network
   // fetch when full_text is already present (the retry optimization in
   // fetchArticleContent), which is exactly what a redownload must bypass.
   // Page fetches are not HTTP-cached (only RSS XML is), so this is fresh.
-  const content = await fetchArticleContent(article.url)
+  const content = await fetchArticleContent(article.url, {
+    ...(storedExcerpt ? { listingExcerpt: storedExcerpt } : {}),
+  })
 
   if (!content.fullText || isBotBlockPage(content.fullText)) {
     // Keep old content and derived output; only record the error.

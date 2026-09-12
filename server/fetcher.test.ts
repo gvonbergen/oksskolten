@@ -1841,6 +1841,45 @@ describe('fetchSingleFeed — content extraction', () => {
     expect(row.full_text).toContain('meaningful article content')
   })
 
+  it('persists the raw RSS listing excerpt at ingestion for deterministic redownloads', async () => {
+    const feed = seedFeed()
+    const rssXml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Test</title>
+    <item>
+      <title>SPA Persist</title>
+      <link>https://example.com/spa-persist</link>
+      <description><![CDATA[<p>RSS fallback body that persists for later redownload. It contains enough substantial prose to be a meaningful fallback when the page cannot be fetched.</p>]]></description>
+    </item>
+  </channel>
+</rss>`
+
+    // Page extraction fails entirely (SPA shell)
+    const spaHtml = `<!DOCTYPE html>
+<html>
+<head><title>SPA Persist</title></head>
+<body><div id="app"></div></body>
+</html>`
+
+    mockFetch.mockImplementation((url: string | URL) => {
+      const u = url.toString()
+      if (u === feed.rss_url) return Promise.resolve(mockResponse(rssXml, { headers: { 'content-type': 'application/rss+xml' } }))
+      if (u === 'https://example.com/spa-persist') return Promise.resolve(mockResponse(spaHtml))
+      return Promise.resolve(mockResponse('', { status: 404 }))
+    })
+
+    await fetchSingleFeed(feed)
+
+    const { getDb } = await import('./db.js')
+    const row = getDb().prepare('SELECT full_text, rss_excerpt FROM articles WHERE url = ?').get('https://example.com/spa-persist') as { full_text: string | null; rss_excerpt: string | null }
+    // The RSS fallback hydrated the stored content...
+    expect(row.full_text).toContain('RSS fallback body')
+    // ...and the raw listing excerpt was persisted for later redownloads.
+    expect(row.rss_excerpt).toContain('RSS fallback body')
+    expect(row.rss_excerpt).toContain('<p>')
+  })
+
   it('non-Error thrown in processArticle is stringified', async () => {
     const feed = seedFeed()
     const rssXml = rss20Xml('Test', [
@@ -3298,5 +3337,38 @@ describe('redownloadArticle', () => {
     const redownloadArticle = await importRedownload()
     expect(await redownloadArticle(999999)).toBe(false)
     expect(mockFetch).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the persisted RSS excerpt when the live page disappears', async () => {
+    const redownloadArticle = await importRedownload()
+    const feed = seedFeed()
+    // Page is gone; only the stored RSS listing excerpt can hydrate content.
+    mockFetch.mockImplementation((url: string | URL) => {
+      if (url.toString() === 'https://example.com/spa-redownload') return Promise.resolve(mockResponse('', { status: 404 }))
+      return Promise.resolve(mockResponse('', { status: 404 }))
+    })
+
+    const id = insertArticle({
+      feed_id: feed.id,
+      title: 'SPA Redownload',
+      url: 'https://example.com/spa-redownload',
+      published_at: '2024-01-01T00:00:00Z',
+      lang: 'en',
+      full_text: 'previously hydrated content from RSS',
+      summary: 'old summary',
+      rss_excerpt: '<p>Stored RSS fallback content that should be reused when the page fetch fails during redownload.</p>',
+    })
+
+    const result = await redownloadArticle(id)
+    // The redownload succeeds through the same fallback path a new article
+    // gets, using the persisted listing excerpt.
+    expect(result).toBe(true)
+
+    const row = getDb().prepare('SELECT full_text, rss_excerpt, last_error, fetched_at FROM articles WHERE id = ?').get(id) as { full_text: string | null; rss_excerpt: string | null; last_error: string | null; fetched_at: string }
+    expect(row.full_text).toContain('Stored RSS fallback content')
+    expect(row.full_text).not.toContain('<p>')
+    expect(row.last_error).toBeNull()
+    // The stored listing is kept for yet another redownload.
+    expect(row.rss_excerpt).toContain('Stored RSS fallback content')
   })
 })

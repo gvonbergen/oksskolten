@@ -328,6 +328,40 @@ describe('POST /api/articles/from-url', () => {
     expect(res.json().error).toMatch(/clip feed/i)
   })
 
+  it('200: re-clipping a hidden RSS article resurrects the existing row into the clip feed', async () => {
+    const clipFeed = ensureClipFeed()
+    const rssFeed = seedFeed()
+    // RSS article exists; delete soft-hides it.
+    const artId = seedArticle(rssFeed.id, { url: 'https://blog.example.com/hidden-then-reclip', full_text: 'RSS body' })
+
+    const del = await app.inject({ method: 'DELETE', url: `/api/articles/${artId}` })
+    expect(del.statusCode).toBe(204)
+    // Hidden → invisible to retrievers, so a fresh clip does not 409.
+    const byUrl = await app.inject({ method: 'GET', url: `/api/articles/by-url?url=${encodeURIComponent('https://blog.example.com/hidden-then-reclip')}` })
+    expect(byUrl.statusCode).toBe(404)
+
+    // Re-clip without force: the hidden row is resurrected into the clip feed.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/articles/from-url',
+      headers: json,
+      payload: { url: 'https://blog.example.com/hidden-then-reclip' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.resurrected).toBe(true)
+    expect(body.article.id).toBe(artId)
+    expect(body.article.feed_id).toBe(clipFeed.id)
+    // No duplicate row was inserted (articles.url is UNIQUE).
+    const dupCount = getDb().prepare('SELECT COUNT(*) AS c FROM articles WHERE url = ?').get('https://blog.example.com/hidden-then-reclip') as { c: number }
+    expect(dupCount.c).toBe(1)
+    // The row is visible again: by-url now resolves.
+    const after = await app.inject({ method: 'GET', url: `/api/articles/by-url?url=${encodeURIComponent('https://blog.example.com/hidden-then-reclip')}` })
+    expect(after.statusCode).toBe(200)
+    expect(after.json().id).toBe(artId)
+  })
+
   it('500: clip feed not found', async () => {
     // Do NOT call ensureClipFeed — no clip feed exists
     const res = await app.inject({

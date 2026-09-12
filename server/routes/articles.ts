@@ -17,6 +17,7 @@ import {
   updateArticleContent,
   updateScore,
   hideArticle,
+  getHiddenArticleByUrl,
   getExistingArticleUrls,
   getClipFeed,
   insertArticle,
@@ -349,6 +350,36 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
         const movedDoc = buildMeiliDoc(existing.id)
         if (movedDoc) syncArticleToSearch(movedDoc)
         reply.status(200).send({ article: moved, moved: true })
+        return
+      }
+
+      // The URL may belong to a soft-deleted (hidden) RSS article. Hide
+      // leaves the row in `articles` (needed for the feed poll's duplicate
+      // check) while the retrieval view excludes it, so getArticleByUrl
+      // misses it and a plain insert would violate articles.url UNIQUE. Own
+      // the row instead of the deleter: resurrect it into the clip feed.
+      const hidden = getHiddenArticleByUrl(body.url)
+      if (hidden) {
+        const clipFeed = getClipFeed()
+        if (!clipFeed) {
+          reply.status(500).send({ error: 'Clip feed not found' })
+          return
+        }
+        getDb().transaction(() => {
+          getDb().prepare(
+            'UPDATE articles SET feed_id = ?, category_id = NULL, hidden_at = NULL WHERE id = ?',
+          ).run(clipFeed.id, hidden.id)
+        })()
+        // The search doc was removed at hide time; re-add it now that the
+        // article surfaces again (best-effort, outside the transaction).
+        const doc = buildMeiliDoc(hidden.id)
+        if (doc) syncArticleToSearch(doc)
+        const resurrected = getArticleById(hidden.id)
+        if (!resurrected) {
+          reply.status(500).send({ error: 'Failed to resurrect article' })
+          return
+        }
+        reply.status(200).send({ article: resurrected, resurrected: true, moved: true })
         return
       }
 
