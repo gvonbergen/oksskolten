@@ -17,6 +17,10 @@ import {
   getRetryStats,
   hideArticle,
   getExistingArticleUrls,
+  getArticlesNeedingRefresh,
+  countStaleArticlesByFeed,
+  getSummaryCounts,
+  getArticlesMissingSummaries,
 } from '../db.js'
 import { createFeed, createCategory, getDb } from '../db.js'
 import { buildMeiliDoc, stripMeiliDocMetadata } from './articles.js'
@@ -914,5 +918,29 @@ describe('hideArticle', () => {
 
   it('returns false for unknown articles', () => {
     expect(hideArticle(999999)).toBe(false)
+  })
+
+  it('excludes hidden articles from the stale-refresh maintenance scans', () => {
+    const feed = seedFeed()
+    const visibleShort = seedArticle(feed.id, { url: 'https://example.com/visible-short', full_text: 'tiny' })
+    const hiddenShort = seedArticle(feed.id, { url: 'https://example.com/hidden-short', full_text: 'tiny' })
+    hideArticle(hiddenShort)
+
+    expect(countStaleArticlesByFeed(feed.id, 200)).toBe(1)
+    const toRefresh = getArticlesNeedingRefresh(feed.id, 200)
+    expect(toRefresh.map(a => a.id)).toEqual([visibleShort])
+    expect(toRefresh.some(a => a.id === hiddenShort)).toBe(false)
+  })
+
+  it('excludes hidden articles from the summarizable population', () => {
+    const feed = seedFeed()
+    const visible = seedArticle(feed.id, { url: 'https://example.com/visible-sum', full_text: 'Body text long enough to be summarizable article content' })
+    const hidden = seedArticle(feed.id, { url: 'https://example.com/hidden-sum', full_text: 'Another body text long enough to be summarizable article content' })
+    hideArticle(hidden)
+
+    const counts = getSummaryCounts()
+    expect(counts.total).toBe(1)
+    expect(counts.summarized).toBe(0)
+    expect(getArticlesMissingSummaries(10).map(a => a.id)).toEqual([visible])
   })
 })

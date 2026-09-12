@@ -489,6 +489,7 @@ export function getArticlesNeedingRefresh(
     FROM articles
     WHERE feed_id = ?
       AND purged_at IS NULL
+      AND hidden_at IS NULL
       AND length(coalesce(trim(full_text), '')) < ?
       AND (last_refresh_attempt_at IS NULL OR datetime(last_refresh_attempt_at) < ${REFRESH_ATTEMPT_BACKOFF})
   `).all(feedId, minLength) as { id: number; url: string; full_text: string | null }[]
@@ -508,6 +509,7 @@ export function countStaleArticlesByFeed(feedId: number, minLength: number): num
     FROM articles
     WHERE feed_id = ?
       AND purged_at IS NULL
+      AND hidden_at IS NULL
       AND length(coalesce(trim(full_text), '')) < ?
       AND (last_refresh_attempt_at IS NULL OR datetime(last_refresh_attempt_at) < ${REFRESH_ATTEMPT_BACKOFF})
   `).get(feedId, minLength) as { n: number }
@@ -752,6 +754,7 @@ export function getSummaryCounts(): { total: number; summarized: number } {
     FROM articles a
     JOIN feeds f ON f.id = a.feed_id
     WHERE a.purged_at IS NULL
+      AND a.hidden_at IS NULL
       AND f.type != 'clip'
       AND a.full_text IS NOT NULL AND trim(a.full_text) != ''
   `).get() as { total: number; summarized: number }
@@ -774,6 +777,7 @@ export function getArticlesMissingSummaries(
     FROM articles a
     JOIN feeds f ON f.id = a.feed_id
     WHERE a.purged_at IS NULL
+      AND a.hidden_at IS NULL
       AND f.type != 'clip'
       AND a.full_text IS NOT NULL AND trim(a.full_text) != ''
       AND (a.summary IS NULL OR trim(a.summary) = '')`
