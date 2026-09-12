@@ -3267,6 +3267,40 @@ describe('redownloadArticle', () => {
     expect(row.last_error).toBeNull()
   })
 
+  it('keeps old content when a long extraction fails the quality gate, recording last_error', async () => {
+    const redownloadArticle = await importRedownload()
+    const feed = seedFeed()
+    const junkBody = [
+      // Long leaked-script style text: plenty of tokens, almost no prose sentences.
+      `<p>const payload = {${'x'.repeat(400)} }</p>`,
+      `<p>window.data.push(payload);</p>`,
+      `<p>render();</p>`,
+    ].join('\n')
+    mockFetch.mockImplementation((url: string | URL) => {
+      if (url.toString() === 'https://example.com/garbage') return Promise.resolve(mockResponse(articleHtml({ title: 'Garbage', body: junkBody })))
+      return Promise.resolve(mockResponse('', { status: 404 }))
+    })
+
+    const id = insertArticle({
+      feed_id: feed.id,
+      title: 'Garbage',
+      url: 'https://example.com/garbage',
+      published_at: '2024-01-01T00:00:00Z',
+      lang: 'en',
+      full_text: 'previous good content',
+      summary: 'previous summary',
+    })
+
+    const result = await redownloadArticle(id)
+    // Long junk must not replace a working article; it is a failed redownload.
+    expect(result).toBe(false)
+
+    const row = getDb().prepare('SELECT full_text, summary, last_error FROM articles WHERE id = ?').get(id) as { full_text: string; summary: string | null; last_error: string | null }
+    expect(row.full_text).toBe('previous good content')
+    expect(row.summary).toBe('previous summary')
+    expect(row.last_error).toBe('redownload: no usable content extracted')
+  })
+
   it('runs auto-summarization after a successful redownload when summary.auto is on', async () => {
     const redownloadArticle = await importRedownload()
     const feed = seedFeed()

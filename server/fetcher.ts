@@ -22,7 +22,7 @@ import {
 import { Semaphore, CONCURRENCY, errorMessage } from './fetcher/util.js'
 import { detectAndStoreSimilarArticles } from './similarity.js'
 import { type FetchProgressEvent, emitProgress, markFeedDone } from './fetcher/progress.js'
-import { fetchFullText, isBotBlockPage, convertHtmlToMarkdown, markdownToExcerpt, MIN_EXTRACTED_LENGTH } from './fetcher/content.js'
+import { fetchFullText, isBotBlockPage, isGarbageExtraction, convertHtmlToMarkdown, markdownToExcerpt, MIN_EXTRACTED_LENGTH } from './fetcher/content.js'
 import { type FetchRssResult, type RssItem, fetchAndParseRss, RateLimitError } from './fetcher/rss.js'
 import { computeInterval, computeEmpiricalInterval, sqliteFuture, DEFAULT_INTERVAL } from './fetcher/schedule.js'
 import { detectLanguage, autoSummarizeArticle, shouldAutoSummarizeNow } from './fetcher/ai.js'
@@ -293,7 +293,14 @@ export async function redownloadArticle(articleId: number): Promise<boolean> {
     ...(storedExcerpt ? { listingExcerpt: storedExcerpt } : {}),
   })
 
-  if (!content.fullText || isBotBlockPage(content.fullText)) {
+  if (
+    !content.fullText ||
+    isBotBlockPage(content.fullText) ||
+    // Long extractions that fail the quality gate (verbose error/maintenance
+    // shells, leaked scripts) must not replace a working article; genuinely
+    // short pages stay exempt so valid micro-posts keep redownloading.
+    (content.fullText.replace(/\s+/g, ' ').trim().length >= MIN_EXTRACTED_LENGTH && isGarbageExtraction(content.fullText))
+  ) {
     // Keep old content and derived output; only record the error.
     updateArticleContent(articleId, {
       last_error: content.lastError ?? 'redownload: no usable content extracted',

@@ -220,7 +220,7 @@ export async function fetchFullText(articleUrl: string, options?: FetchFullTextO
  * A legitimate blog post about JS has explanatory sentences outside code blocks;
  * garbage extraction from leaked scripts has almost none.
  */
-function isGarbageExtraction(text: string): boolean {
+export function isGarbageExtraction(text: string): boolean {
   // Bot detection / form submission pages
   if (isBotBlockPage(text)) return true
 
