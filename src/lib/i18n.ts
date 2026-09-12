@@ -155,8 +155,12 @@ const dict = {
   'article.removeBookmark': { ja: '後で読むを解除', en: 'Remove from read later', zh: '取消稍后阅读'},
   'article.addLike': { ja: 'いいね', en: 'Like', zh: '点赞'},
   'article.removeLike': { ja: 'いいねを解除', en: 'Unlike', zh: '取消点赞'},
-  'article.delete': { ja: '削除', en: 'Delete', zh: '删除'},
-  'article.deleteConfirm': { ja: 'この記事を削除しますか？', en: 'Delete this article?', zh: '确定删除这篇文章？'},
+  'article.delete': { ja: '削除', en: 'Delete', zh: '删除' },
+  'article.deleteConfirm': { ja: 'この記事を削除しますか？', en: 'Delete this article?', zh: '确定删除这篇文章？' },
+  'article.deleteConfirmRss': { ja: 'この記事を削除しますか？リストと検索結果から消え、フィードの更新でも再登録されません。', en: 'Delete this article? It will disappear from your lists and search, and will not come back on the next feed refresh.', zh: '确定删除这篇文章？它将从列表和搜索中消失，且订阅源刷新后不会恢复。' },
+  'article.redownload': { ja: '再取得', en: 'Redownload', zh: '重新下载' },
+  'article.redownloading': { ja: '再取得中...', en: 'Redownloading...', zh: '正在重新下载...' },
+  'article.redownloadFailed': { ja: '記事の再取得に失敗しました。元の内容はそのまま残っています。', en: 'Redownload failed. The previous content was kept.', zh: '重新下载失败。已保留原内容。' },
 
   // AddModal (unified)
   'modal.addNew': { ja: 'はじめる', en: 'Get Started', zh: '开始使用'},

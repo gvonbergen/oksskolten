@@ -57,8 +57,9 @@ export function ArticleDetail({ articleUrl, enableZapNavigation = false }: Artic
   )
   const { viewMode, setViewMode, translating, translatingText, fullTextTranslated, handleTranslate, translatingHtml, error: translateError } = useTranslate(translateInput, metrics)
   const {
-    isBookmarked, isLiked, archivingImages, deleteConfirmOpen, setDeleteConfirmOpen,
-    toggleBookmark, toggleLike, handleArchiveImages, handleDelete,
+    isBookmarked, isLiked, archivingImages, redownloading, redownloadError, setRedownloadError,
+    deleteConfirmOpen, setDeleteConfirmOpen,
+    toggleBookmark, toggleLike, handleArchiveImages, handleRedownload, handleDelete,
   } = useArticleActions(article, articleKey)
   const chat = useChatInline(article?.id ?? 0)
 
@@ -214,9 +215,11 @@ export function ArticleDetail({ articleUrl, enableZapNavigation = false }: Artic
         isBookmarked={!!isBookmarked}
         isLiked={isLiked}
         archivingImages={archivingImages}
+        redownloading={redownloading}
         onToggleBookmark={toggleBookmark}
         onToggleLike={toggleLike}
         onArchiveImages={handleArchiveImages}
+        onRedownload={handleRedownload}
         onDelete={() => setDeleteConfirmOpen(true)}
       />
 
@@ -256,6 +259,22 @@ export function ArticleDetail({ articleUrl, enableZapNavigation = false }: Artic
         </Callout>
       )}
 
+      {/* Redownload error */}
+      {redownloadError && (
+        <Callout variant="error">
+          <div className="flex items-start justify-between gap-4">
+            <p className="text-sm text-error">{t('article.redownloadFailed')}</p>
+            <button
+              type="button"
+              className="text-muted hover:text-error text-sm shrink-0"
+              onClick={() => setRedownloadError(false)}
+            >
+              ✕
+            </button>
+          </div>
+        </Callout>
+      )}
+
       {/* Translation metrics */}
       {metrics.metrics && !summarizing && !translating && hasTranslation && (
         <p className="text-xs text-muted mb-4">
@@ -284,7 +303,7 @@ export function ArticleDetail({ articleUrl, enableZapNavigation = false }: Artic
     {deleteConfirmOpen && (
       <ConfirmDialog
         title={t('article.delete')}
-        message={t('article.deleteConfirm')}
+        message={article.feed_type === 'clip' ? t('article.deleteConfirm') : t('article.deleteConfirmRss')}
         confirmLabel={t('article.delete')}
         danger
         onConfirm={() => { setDeleteConfirmOpen(false); handleDelete() }}

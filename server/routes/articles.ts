@@ -16,6 +16,7 @@ import {
   markArticleLiked,
   updateArticleContent,
   updateScore,
+  hideArticle,
   getExistingArticleUrls,
   getClipFeed,
   insertArticle,
@@ -28,7 +29,7 @@ import { buildMeiliFilter, hasMeaningfulSearchQuery, searchArticlesWithHybrid } 
 import { isSearchReady, isSemanticReady, syncArticleToSearch } from '../search/sync.js'
 import { EMBEDDER_NAME, getSemanticRatio } from '../search/embedding.js'
 import { requireJson } from '../auth.js'
-import { summarizeArticle, translateArticle, streamSummarizeArticle, streamTranslateArticle, fetchArticleContent } from '../fetcher.js'
+import { summarizeArticle, translateArticle, streamSummarizeArticle, streamTranslateArticle, fetchArticleContent, redownloadArticle } from '../fetcher.js'
 import type { AiTextResult } from '../fetcher.js'
 import { archiveArticleImages, isImageArchivingEnabled, deleteArticleImages } from '../fetcher/article-images.js'
 import { getSetting } from '../db/settings.js'
@@ -551,6 +552,45 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
     },
   )
 
+  // --- Redownload ---
+
+  // Single-process server: an in-memory set is a sufficient per-article
+  // concurrency guard (no DB marker or migration needed). Cleared in the
+  // background job's finally block.
+  const redownloadInProgress = new Set<number>()
+
+  api.post(
+    '/api/articles/:id/redownload',
+    async (request, reply) => {
+      const params = parseOrBadRequest(NumericIdParams, request.params, reply)
+      if (!params) return
+      const article = getArticleById(params.id)
+      if (!article) {
+        reply.status(404).send({ error: 'Article not found' })
+        return
+      }
+      if (redownloadInProgress.has(params.id)) {
+        reply.status(409).send({ error: 'Redownload already in progress', code: 'REDOWNLOAD_IN_PROGRESS' })
+        return
+      }
+      redownloadInProgress.add(params.id)
+      // Return 202 and process in background (same pattern as
+      // archive-images): a page fetch can take ~15s plus a FlareSolverr
+      // fallback round, far beyond a comfortable request timeout.
+      reply.status(202).send({ status: 'accepted' })
+      redownloadArticle(params.id)
+        .then((ok) => {
+          if (!ok) request.log.warn(`redownload failed for article ${params.id}`)
+        })
+        .catch((err) => {
+          request.log.error(err, 'redownload failed')
+        })
+        .finally(() => {
+          redownloadInProgress.delete(params.id)
+        })
+    },
+  )
+
   api.delete(
     '/api/articles/:id',
     async (request, reply) => {
@@ -561,10 +601,6 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
         reply.status(404).send({ error: 'Article not found' })
         return
       }
-      if (article.feed_type !== 'clip') {
-        reply.status(403).send({ error: 'Only clipped articles can be deleted' })
-        return
-      }
       // Clean up archived images if any
       if (article.images_archived_at) {
         try {
@@ -573,7 +609,15 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
           request.log.error(err, 'Failed to delete archived images')
         }
       }
-      deleteArticle(article.id)
+      if (article.feed_type === 'clip') {
+        // Clips are user-created: hard delete.
+        deleteArticle(article.id)
+      } else {
+        // RSS articles must not come back on the next feed poll, so delete
+        // is a soft-hide: the row stays for the poll's duplicate check but
+        // is excluded from every retrieval API and the search index.
+        hideArticle(article.id)
+      }
       reply.status(204).send()
     },
   )

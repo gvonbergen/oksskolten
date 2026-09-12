@@ -236,7 +236,7 @@ export function getArticleByUrl(url: string): ArticleDetail | undefined {
     SELECT a.id, a.feed_id, f.name AS feed_name, f.type AS feed_type,
            a.title, a.url, a.published_at, a.lang, a.summary, a.excerpt, a.og_image,
            a.full_text, a.full_text_translated, a.translated_lang, a.seen_at, a.read_at, a.bookmarked_at, a.liked_at,
-           a.images_archived_at,
+           a.images_archived_at, a.fetched_at,
            (SELECT COUNT(*) FROM article_similarities WHERE article_id = a.id) AS similar_count
     FROM active_articles a
     JOIN feeds f ON a.feed_id = f.id
@@ -267,7 +267,7 @@ export function getArticleById(id: number): ArticleDetail | undefined {
     SELECT a.id, a.feed_id, f.name AS feed_name, f.type AS feed_type,
            a.title, a.url, a.published_at, a.lang, a.summary, a.excerpt, a.og_image,
            a.full_text, a.full_text_translated, a.translated_lang, a.seen_at, a.read_at, a.bookmarked_at, a.liked_at,
-           a.images_archived_at,
+           a.images_archived_at, a.fetched_at,
            (SELECT COUNT(*) FROM article_similarities WHERE article_id = a.id) AS similar_count
     FROM active_articles a
     JOIN feeds f ON a.feed_id = f.id
@@ -442,6 +442,7 @@ export function updateArticleContent(
     retry_count?: number
     last_retry_at?: string | null
     last_refresh_attempt_at?: string | null
+    fetched_at?: string | null
   },
 ): void {
   const fields: string[] = []
@@ -717,6 +718,21 @@ export function clearImagesArchived(articleId: number): void {
 
 export function deleteArticle(id: number): boolean {
   const result = getDb().prepare('DELETE FROM articles WHERE id = ?').run(id)
+  if (result.changes > 0) deleteArticleFromSearch(id)
+  return result.changes > 0
+}
+
+/**
+ * Soft-hide an article (RSS delete semantics). The row stays in the base
+ * table so the feed poll's duplicate check (getExistingArticleUrls, which
+ * reads `articles` directly) keeps treating it as existing and never
+ * re-inserts it, but the active_articles view excludes it, so every
+ * retrieval API (lists, search, by-url, by-id) treats it as absent. The
+ * search-index document is removed at hide time; the row is later
+ * hard-purged by retention like any other expired article.
+ */
+export function hideArticle(id: number): boolean {
+  const result = getDb().prepare("UPDATE articles SET hidden_at = datetime('now') WHERE id = ? AND purged_at IS NULL").run(id)
   if (result.changes > 0) deleteArticleFromSearch(id)
   return result.changes > 0
 }

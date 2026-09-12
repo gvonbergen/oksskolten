@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setupTestDb } from '../__tests__/helpers/testDb.js'
 import { buildApp } from '../__tests__/helpers/buildApp.js'
-import { createFeed, insertArticle, ensureClipFeed, getArticleById, markImagesArchived, markArticleSeen, upsertSetting } from '../db.js'
+import { createFeed, insertArticle, ensureClipFeed, getArticleById, markImagesArchived, markArticleSeen, upsertSetting, getDb } from '../db.js'
 import { buildMeiliDoc } from '../db/articles.js'
 import type { FastifyInstance } from 'fastify'
 import path from 'node:path'
@@ -374,7 +374,7 @@ describe('DELETE /api/articles/:id', () => {
     expect(mockDeleteArticleImages).toHaveBeenCalledWith(artId)
   })
 
-  it('403: rejects deletion of RSS feed articles', async () => {
+  it('204: RSS article delete soft-hides instead of hard delete', async () => {
     const feed = seedFeed()
     const artId = seedArticle(feed.id)
 
@@ -383,8 +383,13 @@ describe('DELETE /api/articles/:id', () => {
       url: `/api/articles/${artId}`,
     })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.json().error).toMatch(/clip/i)
+    expect(res.statusCode).toBe(204)
+    // Soft-hide semantics: retrieval APIs treat the article as absent...
+    expect(getArticleById(artId)).toBeUndefined()
+    // ...but the row stays (with hidden_at set) so the feed poll's
+    // duplicate check never re-inserts it.
+    const row = getDb().prepare('SELECT hidden_at FROM articles WHERE id = ?').get(artId) as { hidden_at: string | null }
+    expect(row.hidden_at).not.toBeNull()
   })
 
   it('404: article not found', async () => {

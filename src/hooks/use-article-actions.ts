@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useSWRConfig } from 'swr'
 import { apiPatch, apiPost, apiDelete } from '../lib/fetcher'
@@ -11,6 +11,8 @@ export function useArticleActions(article: ArticleDetail | undefined, articleKey
   const [optimisticBookmark, setOptimisticBookmark] = useState<boolean | undefined>(undefined)
   const [optimisticLiked, setOptimisticLiked] = useState<string | null | undefined>(undefined)
   const [archivingImages, setArchivingImages] = useState(false)
+  const [redownloading, setRedownloading] = useState(false)
+  const [redownloadError, setRedownloadError] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
 
   const isBookmarked = optimisticBookmark !== undefined ? optimisticBookmark : !!article?.bookmarked_at
@@ -93,19 +95,69 @@ export function useArticleActions(article: ArticleDetail | undefined, articleKey
         void globalMutate((key: unknown) =>
           typeof key === 'string' && key.startsWith('/api/feeds'),
         )
+        // RSS deletes are soft-hides; article lists must drop them too.
+        revalidateLists()
       })
       .catch((err) => console.warn('Failed to delete article:', err))
-  }, [article, globalMutate, navigate])
+  }, [article, globalMutate, navigate, revalidateLists])
+
+  // Redownload runs as a 202 background job server-side (a page fetch can
+  // take ~15s plus a FlareSolverr fallback round), so poll the article SWR
+  // key until the server-side fetched_at changes (success marker, refreshed
+  // by the redownload job) or the timeout elapses (failure).
+  const REDOWNLOAD_POLL_INTERVAL_MS = 2000
+  const REDOWNLOAD_TIMEOUT_MS = 90_000
+
+  // Stop polling when the article changes or the component unmounts.
+  const redownloadCancelRef = useRef(false)
+  useEffect(() => {
+    redownloadCancelRef.current = false
+    return () => { redownloadCancelRef.current = true }
+  }, [article?.id])
+
+  const handleRedownload = useCallback(async () => {
+    if (!article || redownloading) return
+    setRedownloading(true)
+    setRedownloadError(false)
+    const initialFetchedAt = article.fetched_at
+    try {
+      await apiPost(`/api/articles/${article.id}/redownload`)
+    } catch {
+      // 409 (already in progress) or transient failure: keep polling — the
+      // running job may still complete.
+    }
+    const deadline = Date.now() + REDOWNLOAD_TIMEOUT_MS
+    while (!redownloadCancelRef.current && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, REDOWNLOAD_POLL_INTERVAL_MS))
+      if (redownloadCancelRef.current) return
+      try {
+        const fresh = await globalMutate(articleKey) as ArticleDetail | undefined
+        if (fresh?.fetched_at && fresh.fetched_at !== initialFetchedAt) {
+          revalidateLists()
+          setRedownloading(false)
+          return
+        }
+      } catch {
+        // Transient network error — keep polling until the deadline.
+      }
+    }
+    setRedownloadError(true)
+    setRedownloading(false)
+  }, [article, articleKey, redownloading, globalMutate, revalidateLists])
 
   return {
     isBookmarked,
     isLiked,
     archivingImages,
+    redownloading,
+    redownloadError,
+    setRedownloadError,
     deleteConfirmOpen,
     setDeleteConfirmOpen,
     toggleBookmark,
     toggleLike,
     handleArchiveImages,
+    handleRedownload,
     handleDelete,
   }
 }

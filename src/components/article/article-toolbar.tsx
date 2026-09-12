@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { ActionChip } from '../ui/action-chip'
 import { ChatInlineTrigger } from '../chat/chat-inline'
-import { Bookmark, ThumbsUp, CloudUpload, CloudCheck, Trash2, Languages, Sparkles } from 'lucide-react'
+import { Bookmark, ThumbsUp, CloudUpload, CloudCheck, Trash, Languages, Sparkles, ArrowDownToLine } from 'lucide-react'
 import { useI18n } from '../../lib/i18n'
 import type { ArticleDetail } from '../../../shared/types'
 
@@ -20,9 +20,11 @@ interface ArticleToolbarProps {
   isBookmarked: boolean
   isLiked: boolean
   archivingImages: boolean
+  redownloading: boolean
   onToggleBookmark: () => void
   onToggleLike: () => void
   onArchiveImages: () => void
+  onRedownload: () => void
   onDelete: () => void
 }
 
@@ -41,9 +43,11 @@ export function ArticleToolbar({
   isBookmarked,
   isLiked,
   archivingImages,
+  redownloading,
   onToggleBookmark,
   onToggleLike,
   onArchiveImages,
+  onRedownload,
   onDelete,
 }: ArticleToolbarProps) {
   const navigate = useNavigate()
@@ -115,12 +119,21 @@ export function ArticleToolbar({
           </svg>
         </ActionChip>
       )}
-      {article.feed_type === 'clip' && (
-        <ActionChip onClick={onDelete}>
-          <Trash2 className="w-3.5 h-3.5" />
-          {t('article.delete')}
+      {!redownloading && (
+        <ActionChip onClick={onRedownload} tooltip={t('article.redownload')}>
+          <ArrowDownToLine className="w-3.5 h-3.5" />
         </ActionChip>
       )}
+      {redownloading && (
+        <ActionChip>
+          <ArrowDownToLine className="w-3.5 h-3.5 animate-pulse" />
+          <span className="text-muted">{t('article.redownloading')}</span>
+        </ActionChip>
+      )}
+      <ActionChip onClick={onDelete}>
+        <Trash className="w-3.5 h-3.5" />
+        {t('article.delete')}
+      </ActionChip>
     </div>
   )
 }

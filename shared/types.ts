@@ -84,6 +84,8 @@ export interface ArticleDetail extends ArticleListItem {
   full_text_translated: string | null
   translated_lang: string | null
   images_archived_at: string | null
+  /** Present on detail responses; used by the client as the redownload completion marker. */
+  fetched_at?: string | null
   feed_type: 'rss' | 'clip'
   imageArchivingEnabled: boolean
 }

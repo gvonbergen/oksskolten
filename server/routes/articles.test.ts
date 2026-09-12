@@ -8,9 +8,10 @@ import type { FastifyInstance } from 'fastify'
 // Mocks
 // ---------------------------------------------------------------------------
 
-const { mockStreamSummarize, mockStreamTranslate } = vi.hoisted(() => ({
+const { mockStreamSummarize, mockStreamTranslate, mockRedownload } = vi.hoisted(() => ({
   mockStreamSummarize: vi.fn(),
   mockStreamTranslate: vi.fn(),
+  mockRedownload: vi.fn(),
 }))
 
 vi.mock('../fetcher.js', async () => {
@@ -23,6 +24,8 @@ vi.mock('../fetcher.js', async () => {
     streamSummarizeArticle: (...args: unknown[]) => mockStreamSummarize(...args),
     translateArticle: vi.fn().mockResolvedValue({ fullTextTranslated: '翻訳テキスト', inputTokens: 10, outputTokens: 5, billingMode: 'standard', model: 'sonnet' }),
     streamTranslateArticle: (...args: unknown[]) => mockStreamTranslate(...args),
+    redownloadArticle: (...args: unknown[]) => mockRedownload(...args),
+    fetchArticleContent: vi.fn(),
     fetchProgress: new EventEmitter(),
     getFeedState: vi.fn(),
   }
@@ -58,6 +61,90 @@ beforeEach(async () => {
   app = await buildApp()
   mockStreamSummarize.mockReset()
   mockStreamTranslate.mockReset()
+  mockRedownload.mockReset()
+})
+
+// ---------------------------------------------------------------------------
+// POST /api/articles/:id/redownload — 202 background job + concurrency guard
+// ---------------------------------------------------------------------------
+
+describe('POST /api/articles/:id/redownload', () => {
+  it('returns 202 and kicks off the background redownload', async () => {
+    const feed = seedFeed()
+    const artId = seedArticle(feed.id)
+    mockRedownload.mockResolvedValue(true)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/articles/${artId}/redownload`,
+    })
+
+    expect(res.statusCode).toBe(202)
+    await vi.waitFor(() => {
+      expect(mockRedownload).toHaveBeenCalledWith(artId)
+    })
+  })
+
+  it('returns 409 with REDOWNLOAD_IN_PROGRESS while a redownload is already running', async () => {
+    const feed = seedFeed()
+    const artId = seedArticle(feed.id)
+    let release!: (v: boolean) => void
+    mockRedownload.mockImplementation(() => new Promise<boolean>((resolve) => { release = resolve }))
+
+    const first = await app.inject({ method: 'POST', url: `/api/articles/${artId}/redownload` })
+    expect(first.statusCode).toBe(202)
+
+    const second = await app.inject({ method: 'POST', url: `/api/articles/${artId}/redownload` })
+    expect(second.statusCode).toBe(409)
+    expect(second.json().code).toBe('REDOWNLOAD_IN_PROGRESS')
+    expect(mockRedownload).toHaveBeenCalledTimes(1)
+
+    // Release the job so the in-flight guard clears for later tests.
+    release(true)
+    await vi.waitFor(() => {
+      expect(mockRedownload.mock.results[0]?.value).toBeInstanceOf(Promise)
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+
+  it('returns 404 for a non-existent article', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/articles/99999/redownload' })
+    expect(res.statusCode).toBe(404)
+    expect(mockRedownload).not.toHaveBeenCalled()
+  })
+
+  it('rejects non-numeric ids with 400', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/articles/abc/redownload' })
+    expect(res.statusCode).toBe(400)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// DELETE /api/articles/:id — RSS soft-hide retrieval semantics
+// ---------------------------------------------------------------------------
+
+describe('DELETE /api/articles/:id — hidden RSS articles are API-invisible', () => {
+  it('treats a deleted RSS article as absent on every retrieval endpoint', async () => {
+    const feed = seedFeed()
+    const url = 'https://example.com/gone-after-delete'
+    const artId = seedArticle(feed.id, { url, full_text: 'Body' })
+
+    const del = await app.inject({ method: 'DELETE', url: `/api/articles/${artId}` })
+    expect(del.statusCode).toBe(204)
+
+    // List endpoint
+    const list = await app.inject({ method: 'GET', url: '/api/articles' })
+    expect(list.json().articles.find((a: { id: number }) => a.id === artId)).toBeUndefined()
+
+    // by-url endpoint
+    const byUrl = await app.inject({ method: 'GET', url: `/api/articles/by-url?url=${encodeURIComponent(url)}` })
+    expect(byUrl.statusCode).toBe(404)
+
+    // Search endpoint (Meilisearch doc was removed at hide time; local
+    // fallback search reads active_articles)
+    const search = await app.inject({ method: 'GET', url: `/api/search?q=Body` })
+    expect(search.json().articles?.find((a: { id: number }) => a.id === artId)).toBeUndefined()
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setupTestDb } from './__tests__/helpers/testDb.js'
-import { createFeed, insertArticle, getArticleByUrl, getFeedById, upsertSetting } from './db.js'
+import { createFeed, insertArticle, getArticleByUrl, getFeedById, upsertSetting, getDb } from './db.js'
 import type { Feed } from './db.js'
 
 // --- Anthropic mock ---
@@ -3087,5 +3087,158 @@ describe('auto summarization of new articles', () => {
       const row = getDb().prepare('SELECT summary FROM articles WHERE url = ?').get('https://example.com/retry-sum') as { summary: string | null }
       expect(row.summary).toBe('Retry summary')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// redownloadArticle — manual force re-fetch through the ingestion pipeline
+// ---------------------------------------------------------------------------
+
+describe('redownloadArticle', () => {
+  async function importRedownload() {
+    const mod = await import('./fetcher.js')
+    return mod.redownloadArticle
+  }
+
+  it('force-fetches, replaces content, and clears derived output', async () => {
+    const redownloadArticle = await importRedownload()
+    const feed = seedFeed()
+    const html = articleHtml({ title: 'Fresh Extract' })
+    mockFetch.mockImplementation((url: string | URL) => {
+      if (url.toString() === 'https://example.com/redownload-me') return Promise.resolve(mockResponse(html))
+      return Promise.resolve(mockResponse('', { status: 404 }))
+    })
+
+    const id = insertArticle({
+      feed_id: feed.id,
+      title: 'Old Content',
+      url: 'https://example.com/redownload-me',
+      published_at: '2024-01-01T00:00:00Z',
+      lang: 'en',
+      full_text: 'old broken content',
+      summary: 'old summary',
+      full_text_translated: '古い翻訳',
+      translated_lang: 'ja',
+      last_error: 'old error',
+    })
+    getDb().prepare("UPDATE articles SET retry_count = 2, fetched_at = '2020-01-01 00:00:00' WHERE id = ?").run(id)
+
+    const result = await redownloadArticle(id)
+    expect(result).toBe(true)
+
+    // The network fetch must have happened (bypasses the full_text skip branch).
+    // mockFetch also serves the Meilisearch client, so scan call targets.
+    expect(mockFetch.mock.calls.some((c) => String(c[0]).includes('redownload-me'))).toBe(true)
+
+    const row = getDb().prepare('SELECT full_text, summary, full_text_translated, translated_lang, last_error, retry_count, fetched_at FROM articles WHERE id = ?').get(id) as Record<string, unknown>
+    // Fresh extraction replaced the stored content (Readability emits the
+    // body paragraphs, not the <h1>).
+    expect(String(row.full_text)).toContain('paragraph of article content')
+    expect(String(row.full_text)).not.toContain('old broken content')
+    expect(row.summary).toBeNull()
+    expect(row.full_text_translated).toBeNull()
+    expect(row.translated_lang).toBeNull()
+    expect(row.last_error).toBeNull()
+    expect(row.retry_count).toBe(0)
+    // fetched_at is refreshed as the client polling completion marker
+    expect(row.fetched_at).not.toBe('2020-01-01 00:00:00')
+  })
+
+  it('keeps old content and derived output on fetch failure, recording last_error', async () => {
+    const redownloadArticle = await importRedownload()
+    const feed = seedFeed()
+    mockFetch.mockRejectedValue(new Error('network down'))
+
+    const id = insertArticle({
+      feed_id: feed.id,
+      title: 'Keep Me',
+      url: 'https://example.com/keep-me',
+      published_at: '2024-01-01T00:00:00Z',
+      lang: 'en',
+      full_text: 'previous good content',
+      summary: 'previous summary',
+    })
+
+    const result = await redownloadArticle(id)
+    expect(result).toBe(false)
+
+    const row = getDb().prepare('SELECT full_text, summary, last_error FROM articles WHERE id = ?').get(id) as { full_text: string; summary: string | null; last_error: string | null }
+    expect(row.full_text).toBe('previous good content')
+    expect(row.summary).toBe('previous summary')
+    // The raw failure is wrapped by the fetch layer; the point is that a
+    // redownload failure only records last_error.
+    expect(row.last_error).toContain('fetchFullText')
+  })
+
+  it('runs auto-summarization after a successful redownload when summary.auto is on', async () => {
+    const redownloadArticle = await importRedownload()
+    const feed = seedFeed()
+    const html = articleHtml({ title: 'Auto Redownload' })
+    mockFetch.mockImplementation((url: string | URL) => {
+      if (url.toString() === 'https://example.com/auto-redownload') return Promise.resolve(mockResponse(html))
+      return Promise.resolve(mockResponse('', { status: 404 }))
+    })
+
+    upsertSetting('summary.auto', 'on')
+    mockMessagesCreate.mockResolvedValue({
+      content: [{ type: 'text', text: 'Redownloaded article summary' }],
+      usage: { input_tokens: 100, output_tokens: 50 },
+    })
+
+    const id = insertArticle({
+      feed_id: feed.id,
+      title: 'Auto Redownload',
+      url: 'https://example.com/auto-redownload',
+      published_at: '2024-01-01T00:00:00Z',
+      lang: 'en',
+      full_text: 'old content',
+    })
+
+    const result = await redownloadArticle(id)
+    expect(result).toBe(true)
+
+    // Auto-summarization is fire-and-forget; wait for it to land.
+    await vi.waitFor(() => {
+      const row = getDb().prepare('SELECT summary FROM articles WHERE id = ?').get(id) as { summary: string | null }
+      expect(row.summary).toBe('Redownloaded article summary')
+    })
+  })
+
+  it('does not run auto-summarization when summary.auto is off', async () => {
+    const redownloadArticle = await importRedownload()
+    const feed = seedFeed()
+    const html = articleHtml({ title: 'No Auto Redownload' })
+    mockFetch.mockImplementation((url: string | URL) => {
+      if (url.toString() === 'https://example.com/no-auto-redownload') return Promise.resolve(mockResponse(html))
+      return Promise.resolve(mockResponse('', { status: 404 }))
+    })
+
+    mockMessagesCreate.mockResolvedValue({
+      content: [{ type: 'text', text: 'should not be used' }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    })
+
+    const id = insertArticle({
+      feed_id: feed.id,
+      title: 'No Auto Redownload',
+      url: 'https://example.com/no-auto-redownload',
+      published_at: '2024-01-01T00:00:00Z',
+      lang: 'en',
+      full_text: 'old content',
+    })
+
+    const result = await redownloadArticle(id)
+    expect(result).toBe(true)
+    // Give any stray fire-and-forget work a chance to run, then assert none.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const row = getDb().prepare('SELECT summary FROM articles WHERE id = ?').get(id) as { summary: string | null }
+    expect(row.summary).toBeNull()
+    expect(mockMessagesCreate).not.toHaveBeenCalled()
+  })
+
+  it('returns false for a non-existent article', async () => {
+    const redownloadArticle = await importRedownload()
+    expect(await redownloadArticle(999999)).toBe(false)
+    expect(mockFetch).not.toHaveBeenCalled()
   })
 })
