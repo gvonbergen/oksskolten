@@ -109,16 +109,19 @@ export function useArticleActions(article: ArticleDetail | undefined, articleKey
   const REDOWNLOAD_TIMEOUT_MS = 90_000
 
   // Stop polling when the article changes or the component unmounts.
-  const redownloadCancelRef = useRef(false)
+  const redownloadArticleIdRef = useRef<number | null>(null)
   useEffect(() => {
-    redownloadCancelRef.current = false
-    return () => { redownloadCancelRef.current = true }
+    setRedownloading(false)
+    setRedownloadError(false)
+    redownloadArticleIdRef.current = article?.id ?? null
+    return () => { redownloadArticleIdRef.current = null }
   }, [article?.id])
 
   const handleRedownload = useCallback(async () => {
     if (!article || redownloading) return
     setRedownloading(true)
     setRedownloadError(false)
+    const targetArticleId = article.id
     const initialFetchedAt = article.fetched_at
     try {
       await apiPost(`/api/articles/${article.id}/redownload`)
@@ -127,9 +130,9 @@ export function useArticleActions(article: ArticleDetail | undefined, articleKey
       // running job may still complete.
     }
     const deadline = Date.now() + REDOWNLOAD_TIMEOUT_MS
-    while (!redownloadCancelRef.current && Date.now() < deadline) {
+    while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, REDOWNLOAD_POLL_INTERVAL_MS))
-      if (redownloadCancelRef.current) return
+      if (redownloadArticleIdRef.current !== targetArticleId) return
       try {
         const fresh = await globalMutate(articleKey) as ArticleDetail | undefined
         if (fresh?.fetched_at && fresh.fetched_at !== initialFetchedAt) {

@@ -3170,6 +3170,36 @@ describe('redownloadArticle', () => {
     expect(row.last_error).toContain('fetchFullText')
   })
 
+  it('keeps old content when extraction is a bot-block shell page, recording last_error', async () => {
+    const redownloadArticle = await importRedownload()
+    const feed = seedFeed()
+    const shellBody = Array(10)
+      .fill('<p>Please verify you are a human before continuing to this site. Your request is being checked and access will be granted shortly.</p>')
+      .join('\n')
+    mockFetch.mockImplementation((url: string | URL) => {
+      if (url.toString() === 'https://example.com/bot-block') return Promise.resolve(mockResponse(articleHtml({ title: 'Bot Block', body: shellBody })))
+      return Promise.resolve(mockResponse('', { status: 404 }))
+    })
+
+    const id = insertArticle({
+      feed_id: feed.id,
+      title: 'Bot Block',
+      url: 'https://example.com/bot-block',
+      published_at: '2024-01-01T00:00:00Z',
+      lang: 'en',
+      full_text: 'previous good content',
+      summary: 'previous summary',
+    })
+
+    const result = await redownloadArticle(id)
+    expect(result).toBe(false)
+
+    const row = getDb().prepare('SELECT full_text, summary, last_error FROM articles WHERE id = ?').get(id) as { full_text: string; summary: string | null; last_error: string | null }
+    expect(row.full_text).toBe('previous good content')
+    expect(row.summary).toBe('previous summary')
+    expect(row.last_error).toBe('redownload: no usable content extracted')
+  })
+
   it('runs auto-summarization after a successful redownload when summary.auto is on', async () => {
     const redownloadArticle = await importRedownload()
     const feed = seedFeed()

@@ -282,12 +282,13 @@ export async function redownloadArticle(articleId: number): Promise<boolean> {
   // Page fetches are not HTTP-cached (only RSS XML is), so this is fresh.
   const content = await fetchArticleContent(article.url)
 
-  if (!content.fullText) {
+  const extractedLen = content.fullText?.replace(/\s+/g, ' ').trim().length ?? 0
+  if (!content.fullText || isBotBlockPage(content.fullText) || extractedLen < MIN_EXTRACTED_LENGTH) {
     // Keep old content and derived output; only record the error.
     updateArticleContent(articleId, {
-      last_error: content.lastError ?? 'redownload: no content extracted',
+      last_error: content.lastError ?? 'redownload: no usable content extracted',
     })
-    log.warn({ articleId, url: article.url }, 'redownload: fetch failed, keeping previous content')
+    log.warn({ articleId, url: article.url, extractedLen }, 'redownload: fetch failed, keeping previous content')
     return false
   }
 
