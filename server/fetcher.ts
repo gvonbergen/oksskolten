@@ -102,6 +102,8 @@ export interface FetchedContent {
   lastError: string | null
   /** Title extracted by fetchFullText (from OGP etc.) */
   title: string | null
+  /** True when the final fullText came from the RSS listing excerpt rather than the live page. */
+  excerptFallback?: boolean
 }
 
 export async function fetchArticleContent(
@@ -120,6 +122,7 @@ export async function fetchArticleContent(
   let lang: string | null = null
   let lastError: string | null = null
   let title: string | null = null
+  let excerptFallback = false
 
   const existing = options?.existingArticle
 
@@ -135,6 +138,7 @@ export async function fetchArticleContent(
   } else if (isAnchorLink && options?.listingExcerpt) {
     fullText = convertHtmlToMarkdown(options.listingExcerpt)
     excerpt = markdownToExcerpt(fullText)
+    excerptFallback = true
   } else {
     try {
       const result = await fetchFullText(url, { requiresJsChallenge: options?.requiresJsChallenge })
@@ -163,6 +167,7 @@ export async function fetchArticleContent(
         fullText = md
         excerpt = markdownToExcerpt(md)
         lastError = null
+        excerptFallback = true
       }
     }
   }
@@ -174,7 +179,7 @@ export async function fetchArticleContent(
     lang = existing.lang
   }
 
-  return { fullText, ogImage, excerpt, lang, lastError, title }
+  return { fullText, ogImage, excerpt, lang, lastError, title, excerptFallback }
 }
 
 // --- Article processing ---
@@ -296,10 +301,14 @@ export async function redownloadArticle(articleId: number): Promise<boolean> {
   if (
     !content.fullText ||
     isBotBlockPage(content.fullText) ||
-    // Long extractions that fail the quality gate (verbose error/maintenance
-    // shells, leaked scripts) must not replace a working article; genuinely
-    // short pages stay exempt so valid micro-posts keep redownloading.
-    (content.fullText.replace(/\s+/g, ' ').trim().length >= MIN_EXTRACTED_LENGTH && isGarbageExtraction(content.fullText))
+    // Long live-page extractions that fail the quality gate (verbose
+    // error/maintenance shells, leaked scripts) must not replace a working
+    // article; genuinely short pages stay exempt so valid micro-posts keep
+    // redownloading. Excerpt-sourced content is authored feed text that the
+    // ingestion pipeline stores verbatim, so it is never garbage-gated.
+    (!content.excerptFallback &&
+      content.fullText.replace(/\s+/g, ' ').trim().length >= MIN_EXTRACTED_LENGTH &&
+      isGarbageExtraction(content.fullText))
   ) {
     // Keep old content and derived output; only record the error.
     updateArticleContent(articleId, {

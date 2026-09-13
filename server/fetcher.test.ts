@@ -3405,4 +3405,38 @@ describe('redownloadArticle', () => {
     // The stored listing is kept for yet another redownload.
     expect(row.rss_excerpt).toContain('Stored RSS fallback content')
   })
+
+  it('accepts long excerpt-sourced content that the live-page quality gate would reject', async () => {
+    const redownloadArticle = await importRedownload()
+    const feed = seedFeed()
+    // A long RSS listing without natural prose sentences (tag-list style).
+    // This is normal feed-authored content: ingestion stores it verbatim, so
+    // redownload must keep it deterministic instead of garbage-rejecting it.
+    const excerptHtml = '<ul>' + Array.from({ length: 8 }, (_, i) =>
+      `<li>item ${i} with enough words to be long but no sentence-final punctuation</li>`,
+    ).join('') + '</ul>'
+    mockFetch.mockImplementation((url: string | URL) => {
+      if (url.toString() === 'https://example.com/excerpt-garbage-shape') return Promise.resolve(mockResponse('', { status: 404 }))
+      return Promise.resolve(mockResponse('', { status: 404 }))
+    })
+
+    const id = insertArticle({
+      feed_id: feed.id,
+      title: 'Excerpt Shape',
+      url: 'https://example.com/excerpt-garbage-shape',
+      published_at: '2024-01-01T00:00:00Z',
+      lang: 'en',
+      full_text: 'previously hydrated content from RSS',
+      summary: 'old summary',
+      rss_excerpt: excerptHtml,
+    })
+
+    const result = await redownloadArticle(id)
+    expect(result).toBe(true)
+
+    const row = getDb().prepare('SELECT full_text, summary, last_error FROM articles WHERE id = ?').get(id) as { full_text: string; summary: string | null; last_error: string | null }
+    expect(row.full_text).toContain('item 2')
+    expect(row.summary).toBeNull()
+    expect(row.last_error).toBeNull()
+  })
 })
