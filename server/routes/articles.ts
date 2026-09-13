@@ -640,14 +640,17 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
           request.log.error(err, 'Failed to delete archived images')
         }
       }
-      if (article.feed_type === 'clip') {
+      if (article.rss_origin === 1) {
+        // RSS-origin articles — including clips resurrected from a hidden RSS
+        // row — must not come back on the next feed poll, so delete is a
+        // soft-hide: the row stays for the poll's duplicate check but is
+        // excluded from every retrieval API and the search index. The
+        // rss_origin marker survives the resurrect, so a second delete
+        // cannot hard-delete the tombstone and let the feed re-import the URL.
+        hideArticle(article.id)
+      } else {
         // Clips are user-created: hard delete.
         deleteArticle(article.id)
-      } else {
-        // RSS articles must not come back on the next feed poll, so delete
-        // is a soft-hide: the row stays for the poll's duplicate check but
-        // is excluded from every retrieval API and the search index.
-        hideArticle(article.id)
       }
       reply.status(204).send()
     },

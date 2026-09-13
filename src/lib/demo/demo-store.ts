@@ -204,6 +204,8 @@ function toArticleDetail(a: SeedArticle): ArticleDetail {
     translated_lang: translatedIds.has(a.id) ? getLocale() : null,
     images_archived_at: null,
     feed_type: feeds.find(f => f.id === a.feed_id)?.type ?? 'rss',
+    rss_origin: feeds.find(f => f.id === a.feed_id)?.type === 'clip' ? 0 : 1,
+    fetched_at: a.fetched_at,
     imageArchivingEnabled: false,
   }
 }
@@ -421,6 +423,21 @@ export const demoStore = {
     if (!article) return null
     article.liked_at = liked ? new Date().toISOString() : null
     return toArticleDetail(article)
+  },
+
+  /** Redownload stub: bump fetched_at so the client's completion poll ends. */
+  redownloadArticle(id: number) {
+    const article = articles.find(a => a.id === id)
+    if (!article) return null
+    article.fetched_at = new Date().toISOString()
+    return { status: 'accepted' }
+  },
+
+  deleteArticle(id: number) {
+    const idx = articles.findIndex(a => a.id === id)
+    if (idx === -1) return null
+    articles.splice(idx, 1)
+    return { success: true }
   },
 
   updateCategory(id: number, patch: Record<string, unknown>) {

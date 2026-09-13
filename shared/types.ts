@@ -87,5 +87,7 @@ export interface ArticleDetail extends ArticleListItem {
   /** Present on detail responses; used by the client as the redownload completion marker. */
   fetched_at?: string | null
   feed_type: 'rss' | 'clip'
+  /** Durable origin flag: 1 = originated from RSS ingestion (survives clip reclassification). */
+  rss_origin: number
   imageArchivingEnabled: boolean
 }

@@ -303,7 +303,7 @@ export function ArticleDetail({ articleUrl, enableZapNavigation = false }: Artic
     {deleteConfirmOpen && (
       <ConfirmDialog
         title={t('article.delete')}
-        message={article.feed_type === 'clip' ? t('article.deleteConfirm') : t('article.deleteConfirmRss')}
+        message={article.rss_origin === 1 ? t('article.deleteConfirmRss') : t('article.deleteConfirm')}
         confirmLabel={t('article.delete')}
         danger
         onConfirm={() => { setDeleteConfirmOpen(false); handleDelete() }}

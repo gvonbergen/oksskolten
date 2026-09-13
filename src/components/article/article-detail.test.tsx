@@ -403,6 +403,7 @@ describe('ArticleDetail redownload and delete chips', () => {
     bookmarked_at: null,
     liked_at: null,
     feed_type: 'rss',
+    rss_origin: 1,
     images_archived_at: null,
     fetched_at: '2026-03-04 00:00:00',
   }
@@ -485,13 +486,26 @@ describe('ArticleDetail redownload and delete chips', () => {
   })
 
   it('shows the plain confirm message for clip articles', async () => {
-    renderArticle({ ...rssArticle, id: 10, feed_type: 'clip' })
+    renderArticle({ ...rssArticle, id: 10, feed_type: 'clip', rss_origin: 0 })
 
     const deleteChip = findChipButton('svg.lucide-trash')!
     fireEvent.click(deleteChip)
 
     await waitFor(() => {
       expect(screen.getByText('Delete this article?')).toBeTruthy()
+    })
+  })
+
+  it('shows the RSS soft-hide confirm message for a resurrected RSS clip', async () => {
+    // A clip that was resurrected from a hidden RSS article keeps its RSS
+    // origin, so it gets the same no-resurrect-on-feed-refresh wording.
+    renderArticle({ ...rssArticle, id: 11, feed_type: 'clip', rss_origin: 1 })
+
+    const deleteChip = findChipButton('svg.lucide-trash')!
+    fireEvent.click(deleteChip)
+
+    await waitFor(() => {
+      expect(screen.getByText('Delete this article? It will disappear from your lists and search, and will not come back on the next feed refresh.')).toBeTruthy()
     })
   })
 })

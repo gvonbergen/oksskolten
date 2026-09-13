@@ -362,6 +362,44 @@ describe('POST /api/articles/from-url', () => {
     expect(after.json().id).toBe(artId)
   })
 
+  it('deleting a resurrected RSS article soft-hides it again instead of hard-deleting the tombstone', async () => {
+    ensureClipFeed()
+    const rssFeed = seedFeed()
+    const url = 'https://blog.example.com/resurrected-then-deleted'
+    const artId = seedArticle(rssFeed.id, { url, full_text: 'RSS body' })
+
+    // First delete: RSS article is soft-hidden.
+    const del1 = await app.inject({ method: 'DELETE', url: `/api/articles/${artId}` })
+    expect(del1.statusCode).toBe(204)
+
+    // Re-clip: the hidden row is resurrected into the clip feed.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/articles/from-url',
+      headers: json,
+      payload: { url },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().article.feed_type).toBe('clip')
+
+    // Second delete: despite living in the clip feed now, the row's RSS
+    // origin is preserved, so this is a soft-hide, not a hard delete — the
+    // feed-poll tombstone (the row itself) must survive.
+    const del2 = await app.inject({ method: 'DELETE', url: `/api/articles/${artId}` })
+    expect(del2.statusCode).toBe(204)
+
+    const row = getDb().prepare('SELECT hidden_at, rss_origin FROM articles WHERE id = ?').get(artId) as { hidden_at: string | null; rss_origin: number }
+    expect(row.rss_origin).toBe(1)
+    expect(row.hidden_at).not.toBeNull()
+    // Still exactly one row: the duplicate-check tombstone was preserved, so
+    // the original feed cannot re-import the twice-deleted URL.
+    const rowCount = getDb().prepare('SELECT COUNT(*) AS c FROM articles WHERE url = ?').get(url) as { c: number }
+    expect(rowCount.c).toBe(1)
+    // And it is invisible to retrieval again.
+    const byUrl = await app.inject({ method: 'GET', url: `/api/articles/by-url?url=${encodeURIComponent(url)}` })
+    expect(byUrl.statusCode).toBe(404)
+  })
+
   it('500: clip feed not found', async () => {
     // Do NOT call ensureClipFeed — no clip feed exists
     const res = await app.inject({

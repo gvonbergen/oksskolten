@@ -233,7 +233,7 @@ export function getArticleByUrl(url: string): ArticleDetail | undefined {
   const db = getDb()
   const normalized = normalizeUrl(url)
   const stmt = db.prepare(`
-    SELECT a.id, a.feed_id, f.name AS feed_name, f.type AS feed_type,
+    SELECT a.id, a.feed_id, f.name AS feed_name, f.type AS feed_type, a.rss_origin,
            a.title, a.url, a.published_at, a.lang, a.summary, a.excerpt, a.og_image,
            a.full_text, a.full_text_translated, a.translated_lang, a.seen_at, a.read_at, a.bookmarked_at, a.liked_at,
            a.images_archived_at, a.fetched_at,
@@ -296,7 +296,7 @@ export function getArticleRssExcerpt(id: number): string | null {
 
 export function getArticleById(id: number): ArticleDetail | undefined {
   return getDb().prepare(`
-    SELECT a.id, a.feed_id, f.name AS feed_name, f.type AS feed_type,
+    SELECT a.id, a.feed_id, f.name AS feed_name, f.type AS feed_type, a.rss_origin,
            a.title, a.url, a.published_at, a.lang, a.summary, a.excerpt, a.og_image,
            a.full_text, a.full_text_translated, a.translated_lang, a.seen_at, a.read_at, a.bookmarked_at, a.liked_at,
            a.images_archived_at, a.fetched_at,
@@ -430,8 +430,9 @@ export function insertArticle(data: {
   rss_excerpt?: string | null
 }): number {
   const info = runNamed(`
-    INSERT INTO articles (feed_id, category_id, title, url, published_at, lang, full_text, full_text_translated, translated_lang, summary, excerpt, og_image, last_error, rss_excerpt)
-    VALUES (@feed_id, (SELECT category_id FROM feeds WHERE id = @feed_id), @title, @url, @published_at, @lang, @full_text, @full_text_translated, @translated_lang, @summary, @excerpt, @og_image, @last_error, @rss_excerpt)
+    INSERT INTO articles (feed_id, category_id, title, url, published_at, lang, full_text, full_text_translated, translated_lang, summary, excerpt, og_image, last_error, rss_excerpt, rss_origin)
+    VALUES (@feed_id, (SELECT category_id FROM feeds WHERE id = @feed_id), @title, @url, @published_at, @lang, @full_text, @full_text_translated, @translated_lang, @summary, @excerpt, @og_image, @last_error, @rss_excerpt,
+      (SELECT CASE WHEN type = 'clip' THEN 0 ELSE 1 END FROM feeds WHERE id = @feed_id))
   `, {
     feed_id: data.feed_id,
     title: data.title,
