@@ -49,13 +49,24 @@ CREATE VIEW active_articles AS
 SELECT * FROM articles WHERE purged_at IS NULL;
 ```
 
+RSS article deletion later reuses the same mechanism (`migrations/0009` / `0011` rebuild the view with an extra filter):
+
+```sql
+CREATE VIEW active_articles AS
+SELECT * FROM articles WHERE purged_at IS NULL AND hidden_at IS NULL;
+```
+
 **Rules:**
 - **Read queries** (SELECT): use `FROM active_articles` / `JOIN active_articles`
 - **Write queries** (INSERT/UPDATE/DELETE): use the base `articles` table directly
-- **`getExistingArticleUrls()`**: uses the base `articles` table (must include purged URLs)
+- **`getExistingArticleUrls()`**: uses the base `articles` table (must include purged and hidden URLs)
 - **Purge functions**: use the base `articles` table (they manage `purged_at` directly)
 
 This makes the rule simple: if you're reading articles for display or aggregation, use the VIEW. If you see `FROM articles` in a SELECT, it should be intentional (write support, URL dedup, or purge logic).
+
+### Soft-hide for RSS article deletion (`hidden_at`)
+
+Deleting an RSS article applies the same soft-delete pattern as purge, for the same reason: the row stays in the base `articles` table so the feed poll's duplicate check (`getExistingArticleUrls()`) can never re-import a URL the user removed. Hidden rows are excluded from every retrieval API and their search-index document is removed at hide time; retention later hard-purges the tombstone. When a hidden RSS article is re-clipped, the route resurrects it (`hidden_at` cleared, moved to the clip feed), and an `rss_origin` marker survives that reclassification so a second delete still soft-hides the row instead of hard-deleting the tombstone.
 
 ### Why `seen_at` (not `read_at`) for read-article retention
 

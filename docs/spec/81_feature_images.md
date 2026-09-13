@@ -60,7 +60,8 @@ Images archived in local mode are served via `GET /api/articles/images/:filename
 
 ### Image Deletion
 
-When an article is deleted, if `images_archived_at` is set, `deleteArticleImages(articleId)` is called. All files matching `{articleId}_*` in the local images directory are deleted.
+- **Clip hard delete**: when an article is deleted from the clip feed, `deleteArticleImages(articleId)` is called if `images_archived_at` is set. All files matching `{articleId}_*` in the local images directory are deleted.
+- **RSS soft-hide**: deleting an RSS-origin article hides the row (see [80_feature_clip.md](./80_feature_clip.md)) without touching the files — a re-clip resurrect re-surfaces the images, and `purgeExpiredArticles` deletes the files together with clearing `images_archived_at` when retention purges the tombstone.
 
 ### Remote Upload Settings
 
