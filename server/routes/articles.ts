@@ -632,14 +632,6 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
         reply.status(404).send({ error: 'Article not found' })
         return
       }
-      // Clean up archived images if any
-      if (article.images_archived_at) {
-        try {
-          deleteArticleImages(article.id)
-        } catch (err) {
-          request.log.error(err, 'Failed to delete archived images')
-        }
-      }
       if (article.rss_origin === 1) {
         // RSS-origin articles — including clips resurrected from a hidden RSS
         // row — must not come back on the next feed poll, so delete is a
@@ -647,9 +639,19 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
         // excluded from every retrieval API and the search index. The
         // rss_origin marker survives the resurrect, so a second delete
         // cannot hard-delete the tombstone and let the feed re-import the URL.
+        // Archived image files stay with the row: resurrect re-surfaces the
+        // article (images included), and purgeExpiredArticles clears both the
+        // files and images_archived_at together when the tombstone is purged.
         hideArticle(article.id)
       } else {
-        // Clips are user-created: hard delete.
+        // Clips are user-created: hard delete. Clean up any archived images.
+        if (article.images_archived_at) {
+          try {
+            deleteArticleImages(article.id)
+          } catch (err) {
+            request.log.error(err, 'Failed to delete archived images')
+          }
+        }
         deleteArticle(article.id)
       }
       reply.status(204).send()

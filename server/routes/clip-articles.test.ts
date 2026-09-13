@@ -464,6 +464,28 @@ describe('DELETE /api/articles/:id', () => {
     expect(row.hidden_at).not.toBeNull()
   })
 
+  it('204: RSS article soft-delete keeps archived image files for the resurrection path', async () => {
+    const feed = seedFeed()
+    const artId = seedArticle(feed.id, { url: 'https://example.com/rss-with-images' })
+    markImagesArchived(artId)
+    mockDeleteArticleImages.mockClear()
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/articles/${artId}`,
+    })
+
+    expect(res.statusCode).toBe(204)
+    // Soft-hide keeps the row and its image files: the row can be
+    // resurrected again (images intact) and the tombstone's cleanup is the
+    // retention purge's job (which deletes files AND nulls
+    // images_archived_at together).
+    expect(mockDeleteArticleImages).not.toHaveBeenCalled()
+    const row = getDb().prepare('SELECT hidden_at, images_archived_at FROM articles WHERE id = ?').get(artId) as { hidden_at: string | null; images_archived_at: string | null }
+    expect(row.hidden_at).not.toBeNull()
+    expect(row.images_archived_at).not.toBeNull()
+  })
+
   it('404: article not found', async () => {
     const res = await app.inject({
       method: 'DELETE',
