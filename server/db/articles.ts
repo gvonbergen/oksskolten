@@ -34,7 +34,7 @@ export function buildMeiliDoc(id: number): MeiliArticleDoc | null {
            (a.seen_at IS NULL) AS is_unread,
            (a.liked_at IS NOT NULL) AS is_liked,
            (a.bookmarked_at IS NOT NULL) AS is_bookmarked
-    FROM articles a JOIN feeds f ON f.id = a.feed_id WHERE a.id = ?
+    FROM articles a JOIN feeds f ON f.id = a.feed_id WHERE a.id = ? AND a.hidden_at IS NULL
   `).get(id) as (MeiliArticleDoc & { _metadata?: unknown }) | undefined
   if (!row) return null
   return applyEmbeddingVectors(stripMeiliDocMetadata(row))
@@ -233,10 +233,10 @@ export function getArticleByUrl(url: string): ArticleDetail | undefined {
   const db = getDb()
   const normalized = normalizeUrl(url)
   const stmt = db.prepare(`
-    SELECT a.id, a.feed_id, f.name AS feed_name, f.type AS feed_type,
+    SELECT a.id, a.feed_id, f.name AS feed_name, f.type AS feed_type, a.rss_origin,
            a.title, a.url, a.published_at, a.lang, a.summary, a.excerpt, a.og_image,
            a.full_text, a.full_text_translated, a.translated_lang, a.seen_at, a.read_at, a.bookmarked_at, a.liked_at,
-           a.images_archived_at,
+           a.images_archived_at, a.fetched_at,
            (SELECT COUNT(*) FROM article_similarities WHERE article_id = a.id) AS similar_count
     FROM active_articles a
     JOIN feeds f ON a.feed_id = f.id
@@ -262,12 +262,44 @@ export function getArticleByUrl(url: string): ArticleDetail | undefined {
   return undefined
 }
 
+export function getHiddenArticleByUrl(url: string): { id: number } | undefined {
+  const db = getDb()
+  const normalized = normalizeUrl(url)
+  const stmt = db.prepare(`
+    SELECT a.id
+    FROM articles a
+    WHERE a.url = ? AND a.hidden_at IS NOT NULL AND a.purged_at IS NULL
+  `)
+
+  const row = stmt.get(normalized) as { id: number } | undefined
+  if (row) return row
+
+  // Protocol fallback (mirror getArticleByUrl): cover the transition period
+  // where some articles were saved under the other protocol.
+  let fallbackUrl: string | null = null
+  if (normalized.startsWith('https://')) {
+    fallbackUrl = 'http://' + normalized.slice(8)
+  } else if (normalized.startsWith('http://')) {
+    fallbackUrl = 'https://' + normalized.slice(7)
+  }
+  if (fallbackUrl) {
+    return stmt.get(fallbackUrl) as { id: number } | undefined
+  }
+
+  return undefined
+}
+
+export function getArticleRssExcerpt(id: number): string | null {
+  const row = getDb().prepare('SELECT rss_excerpt FROM articles WHERE id = ?').get(id) as { rss_excerpt: string | null } | undefined
+  return row?.rss_excerpt ?? null
+}
+
 export function getArticleById(id: number): ArticleDetail | undefined {
   return getDb().prepare(`
-    SELECT a.id, a.feed_id, f.name AS feed_name, f.type AS feed_type,
+    SELECT a.id, a.feed_id, f.name AS feed_name, f.type AS feed_type, a.rss_origin,
            a.title, a.url, a.published_at, a.lang, a.summary, a.excerpt, a.og_image,
            a.full_text, a.full_text_translated, a.translated_lang, a.seen_at, a.read_at, a.bookmarked_at, a.liked_at,
-           a.images_archived_at,
+           a.images_archived_at, a.fetched_at,
            (SELECT COUNT(*) FROM article_similarities WHERE article_id = a.id) AS similar_count
     FROM active_articles a
     JOIN feeds f ON a.feed_id = f.id
@@ -394,10 +426,13 @@ export function insertArticle(data: {
   excerpt?: string | null
   og_image?: string | null
   last_error?: string | null
+  /** Original RSS listing excerpt, persisted at ingestion for deterministic redownloads */
+  rss_excerpt?: string | null
 }): number {
   const info = runNamed(`
-    INSERT INTO articles (feed_id, category_id, title, url, published_at, lang, full_text, full_text_translated, translated_lang, summary, excerpt, og_image, last_error)
-    VALUES (@feed_id, (SELECT category_id FROM feeds WHERE id = @feed_id), @title, @url, @published_at, @lang, @full_text, @full_text_translated, @translated_lang, @summary, @excerpt, @og_image, @last_error)
+    INSERT INTO articles (feed_id, category_id, title, url, published_at, lang, full_text, full_text_translated, translated_lang, summary, excerpt, og_image, last_error, rss_excerpt, rss_origin)
+    VALUES (@feed_id, (SELECT category_id FROM feeds WHERE id = @feed_id), @title, @url, @published_at, @lang, @full_text, @full_text_translated, @translated_lang, @summary, @excerpt, @og_image, @last_error, @rss_excerpt,
+      (SELECT CASE WHEN type = 'clip' THEN 0 ELSE 1 END FROM feeds WHERE id = @feed_id))
   `, {
     feed_id: data.feed_id,
     title: data.title,
@@ -411,6 +446,7 @@ export function insertArticle(data: {
     excerpt: data.excerpt ?? null,
     og_image: data.og_image ?? null,
     last_error: data.last_error ?? null,
+    rss_excerpt: data.rss_excerpt ?? null,
   })
   const articleId = info.lastInsertRowid as number
   const doc = buildMeiliDoc(articleId)
@@ -442,6 +478,7 @@ export function updateArticleContent(
     retry_count?: number
     last_retry_at?: string | null
     last_refresh_attempt_at?: string | null
+    fetched_at?: string | null
   },
 ): void {
   const fields: string[] = []
@@ -488,6 +525,7 @@ export function getArticlesNeedingRefresh(
     FROM articles
     WHERE feed_id = ?
       AND purged_at IS NULL
+      AND hidden_at IS NULL
       AND length(coalesce(trim(full_text), '')) < ?
       AND (last_refresh_attempt_at IS NULL OR datetime(last_refresh_attempt_at) < ${REFRESH_ATTEMPT_BACKOFF})
   `).all(feedId, minLength) as { id: number; url: string; full_text: string | null }[]
@@ -507,6 +545,7 @@ export function countStaleArticlesByFeed(feedId: number, minLength: number): num
     FROM articles
     WHERE feed_id = ?
       AND purged_at IS NULL
+      AND hidden_at IS NULL
       AND length(coalesce(trim(full_text), '')) < ?
       AND (last_refresh_attempt_at IS NULL OR datetime(last_refresh_attempt_at) < ${REFRESH_ATTEMPT_BACKOFF})
   `).get(feedId, minLength) as { n: number }
@@ -722,6 +761,21 @@ export function deleteArticle(id: number): boolean {
 }
 
 /**
+ * Soft-hide an article (RSS delete semantics). The row stays in the base
+ * table so the feed poll's duplicate check (getExistingArticleUrls, which
+ * reads `articles` directly) keeps treating it as existing and never
+ * re-inserts it, but the active_articles view excludes it, so every
+ * retrieval API (lists, search, by-url, by-id) treats it as absent. The
+ * search-index document is removed at hide time; the row is later
+ * hard-purged by retention like any other expired article.
+ */
+export function hideArticle(id: number): boolean {
+  const result = getDb().prepare("UPDATE articles SET hidden_at = datetime('now') WHERE id = ? AND purged_at IS NULL").run(id)
+  if (result.changes > 0) deleteArticleFromSearch(id)
+  return result.changes > 0
+}
+
+/**
  * Summarization coverage counts over the summarizable population: active
  * (non-purged) articles from non-clip feeds that have extractable full text.
  * Clip feeds are excluded because automatic summarization never runs for
@@ -736,6 +790,7 @@ export function getSummaryCounts(): { total: number; summarized: number } {
     FROM articles a
     JOIN feeds f ON f.id = a.feed_id
     WHERE a.purged_at IS NULL
+      AND a.hidden_at IS NULL
       AND f.type != 'clip'
       AND a.full_text IS NOT NULL AND trim(a.full_text) != ''
   `).get() as { total: number; summarized: number }
@@ -758,6 +813,7 @@ export function getArticlesMissingSummaries(
     FROM articles a
     JOIN feeds f ON f.id = a.feed_id
     WHERE a.purged_at IS NULL
+      AND a.hidden_at IS NULL
       AND f.type != 'clip'
       AND a.full_text IS NOT NULL AND trim(a.full_text) != ''
       AND (a.summary IS NULL OR trim(a.summary) = '')`

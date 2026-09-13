@@ -16,6 +16,8 @@ import {
   markArticleLiked,
   updateArticleContent,
   updateScore,
+  hideArticle,
+  getHiddenArticleByUrl,
   getExistingArticleUrls,
   getClipFeed,
   insertArticle,
@@ -28,7 +30,7 @@ import { buildMeiliFilter, hasMeaningfulSearchQuery, searchArticlesWithHybrid } 
 import { isSearchReady, isSemanticReady, syncArticleToSearch } from '../search/sync.js'
 import { EMBEDDER_NAME, getSemanticRatio } from '../search/embedding.js'
 import { requireJson } from '../auth.js'
-import { summarizeArticle, translateArticle, streamSummarizeArticle, streamTranslateArticle, fetchArticleContent } from '../fetcher.js'
+import { summarizeArticle, translateArticle, streamSummarizeArticle, streamTranslateArticle, fetchArticleContent, redownloadArticle } from '../fetcher.js'
 import type { AiTextResult } from '../fetcher.js'
 import { archiveArticleImages, isImageArchivingEnabled, deleteArticleImages } from '../fetcher/article-images.js'
 import { getSetting } from '../db/settings.js'
@@ -351,6 +353,36 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
         return
       }
 
+      // The URL may belong to a soft-deleted (hidden) RSS article. Hide
+      // leaves the row in `articles` (needed for the feed poll's duplicate
+      // check) while the retrieval view excludes it, so getArticleByUrl
+      // misses it and a plain insert would violate articles.url UNIQUE. Own
+      // the row instead of the deleter: resurrect it into the clip feed.
+      const hidden = getHiddenArticleByUrl(body.url)
+      if (hidden) {
+        const clipFeed = getClipFeed()
+        if (!clipFeed) {
+          reply.status(500).send({ error: 'Clip feed not found' })
+          return
+        }
+        getDb().transaction(() => {
+          getDb().prepare(
+            'UPDATE articles SET feed_id = ?, category_id = NULL, hidden_at = NULL WHERE id = ?',
+          ).run(clipFeed.id, hidden.id)
+        })()
+        // The search doc was removed at hide time; re-add it now that the
+        // article surfaces again (best-effort, outside the transaction).
+        const doc = buildMeiliDoc(hidden.id)
+        if (doc) syncArticleToSearch(doc)
+        const resurrected = getArticleById(hidden.id)
+        if (!resurrected) {
+          reply.status(500).send({ error: 'Failed to resurrect article' })
+          return
+        }
+        reply.status(200).send({ article: resurrected, resurrected: true, moved: true })
+        return
+      }
+
       // Get clip feed
       const clipFeed = getClipFeed()
       if (!clipFeed) {
@@ -551,6 +583,45 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
     },
   )
 
+  // --- Redownload ---
+
+  // Single-process server: an in-memory set is a sufficient per-article
+  // concurrency guard (no DB marker or migration needed). Cleared in the
+  // background job's finally block.
+  const redownloadInProgress = new Set<number>()
+
+  api.post(
+    '/api/articles/:id/redownload',
+    async (request, reply) => {
+      const params = parseOrBadRequest(NumericIdParams, request.params, reply)
+      if (!params) return
+      const article = getArticleById(params.id)
+      if (!article) {
+        reply.status(404).send({ error: 'Article not found' })
+        return
+      }
+      if (redownloadInProgress.has(params.id)) {
+        reply.status(409).send({ error: 'Redownload already in progress', code: 'REDOWNLOAD_IN_PROGRESS' })
+        return
+      }
+      redownloadInProgress.add(params.id)
+      // Return 202 and process in background (same pattern as
+      // archive-images): a page fetch can take ~15s plus a FlareSolverr
+      // fallback round, far beyond a comfortable request timeout.
+      reply.status(202).send({ status: 'accepted' })
+      redownloadArticle(params.id)
+        .then((ok) => {
+          if (!ok) request.log.warn(`redownload failed for article ${params.id}`)
+        })
+        .catch((err) => {
+          request.log.error(err, 'redownload failed')
+        })
+        .finally(() => {
+          redownloadInProgress.delete(params.id)
+        })
+    },
+  )
+
   api.delete(
     '/api/articles/:id',
     async (request, reply) => {
@@ -561,19 +632,28 @@ export async function articleRoutes(api: FastifyInstance): Promise<void> {
         reply.status(404).send({ error: 'Article not found' })
         return
       }
-      if (article.feed_type !== 'clip') {
-        reply.status(403).send({ error: 'Only clipped articles can be deleted' })
-        return
-      }
-      // Clean up archived images if any
-      if (article.images_archived_at) {
-        try {
-          deleteArticleImages(article.id)
-        } catch (err) {
-          request.log.error(err, 'Failed to delete archived images')
+      if (article.rss_origin === 1) {
+        // RSS-origin articles — including clips resurrected from a hidden RSS
+        // row — must not come back on the next feed poll, so delete is a
+        // soft-hide: the row stays for the poll's duplicate check but is
+        // excluded from every retrieval API and the search index. The
+        // rss_origin marker survives the resurrect, so a second delete
+        // cannot hard-delete the tombstone and let the feed re-import the URL.
+        // Archived image files stay with the row: resurrect re-surfaces the
+        // article (images included), and purgeExpiredArticles clears both the
+        // files and images_archived_at together when the tombstone is purged.
+        hideArticle(article.id)
+      } else {
+        // Clips are user-created: hard delete. Clean up any archived images.
+        if (article.images_archived_at) {
+          try {
+            deleteArticleImages(article.id)
+          } catch (err) {
+            request.log.error(err, 'Failed to delete archived images')
+          }
         }
+        deleteArticle(article.id)
       }
-      deleteArticle(article.id)
       reply.status(204).send()
     },
   )

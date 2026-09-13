@@ -140,6 +140,9 @@ CREATE TABLE articles (
   bookmarked_at   TEXT,                               -- Bookmark timestamp
   liked_at        TEXT,                               -- Like timestamp
   images_archived_at TEXT,                            -- Image archive completion timestamp
+  hidden_at       TEXT,                               -- RSS delete soft-hide timestamp (excluded from active_articles view; row kept for feed-poll dedup)
+  rss_excerpt     TEXT,                               -- Raw listing content the full_text was hydrated from (redownload fallback; base-table only)
+  rss_origin      INTEGER NOT NULL DEFAULT 0,         -- 1 = originated from RSS ingestion; survives clip reclassification (soft-delete tombstone)
   score           REAL NOT NULL DEFAULT 0,             -- Engagement × time-decay score (periodic Cron update + immediate update on action)
   category_id     INTEGER REFERENCES categories(id) ON DELETE SET NULL, -- Denormalized feed category (for fast category-based sorting)
   created_at      TEXT NOT NULL DEFAULT (datetime('now'))

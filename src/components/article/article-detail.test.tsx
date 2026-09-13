@@ -6,11 +6,12 @@ import { LocaleContext } from '../../lib/i18n'
 import { TooltipProvider } from '../ui/tooltip'
 import { KeyboardNavigationProvider } from '../../contexts/keyboard-navigation-context'
 
-const { mockApiPatch, mockApiPost, mockTrackRead, mockQueueSeenIds } = vi.hoisted(() => ({
+const { mockApiPatch, mockApiPost, mockTrackRead, mockQueueSeenIds, mockSwrFetcher } = vi.hoisted(() => ({
   mockApiPatch: vi.fn(),
   mockApiPost: vi.fn(() => Promise.resolve()),
   mockTrackRead: vi.fn(),
   mockQueueSeenIds: vi.fn((_ids: number[]) => Promise.resolve()),
+  mockSwrFetcher: vi.fn(),
 }))
 
 vi.mock('../../lib/fetcher', async () => {
@@ -19,6 +20,7 @@ vi.mock('../../lib/fetcher', async () => {
     ...actual,
     apiPatch: mockApiPatch,
     apiPost: mockApiPost,
+    fetcher: (url: string) => mockSwrFetcher(url),
   }
 })
 
@@ -374,5 +376,136 @@ describe('ArticleDetail stale translation filtering', () => {
     expect(mockUseTranslate).toHaveBeenCalled()
     const firstArg = mockUseTranslate.mock.calls[0]![0]
     expect(firstArg).toEqual({ id: 1, full_text_translated: null })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Redownload & delete chips (article-level actions)
+// ---------------------------------------------------------------------------
+
+describe('ArticleDetail redownload and delete chips', () => {
+  const articleUrl = 'https://example.com/posts/9'
+  const articleKey = `/api/articles/by-url?url=${encodeURIComponent(articleUrl)}`
+  const rssArticle = {
+    id: 9,
+    feed_id: 2,
+    feed_name: 'Example Feed',
+    title: 'Example Article',
+    url: articleUrl,
+    published_at: '2026-03-04T00:00:00.000Z',
+    lang: 'en',
+    summary: 'Existing summary',
+    full_text: 'Body',
+    full_text_translated: null,
+    translated_lang: null,
+    seen_at: null,
+    read_at: null,
+    bookmarked_at: null,
+    liked_at: null,
+    feed_type: 'rss',
+    rss_origin: 1,
+    images_archived_at: null,
+    fetched_at: '2026-03-04 00:00:00',
+  }
+
+  function renderArticle(article: typeof rssArticle) {
+    return render(
+      <MemoryRouter>
+        <LocaleContext.Provider value={{ locale: 'en', setLocale: vi.fn() }}>
+          <TooltipProvider>
+            <SWRConfig value={{ provider: () => new Map(), fallback: { [articleKey]: article } }}>
+              <Routes>
+                <Route element={<OutletWrapper />}>
+                  <Route path="*" element={<ArticleDetail articleUrl={articleUrl} />} />
+                </Route>
+              </Routes>
+            </SWRConfig>
+          </TooltipProvider>
+        </LocaleContext.Provider>
+      </MemoryRouter>,
+    )
+  }
+
+  function findChipButton(selector: string): HTMLButtonElement | null {
+    const buttons = Array.from(document.querySelectorAll('button'))
+    return buttons.find((b) => b.querySelector(selector)) as HTMLButtonElement | null ?? null
+  }
+
+  beforeEach(() => {
+    mockApiPatch.mockReset()
+    mockApiPost.mockReset()
+    mockApiPost.mockResolvedValue(undefined)
+    mockTrackRead.mockReset()
+    mockQueueSeenIds.mockClear()
+    mockUseTranslate.mockClear()
+    mockSwrFetcher.mockReset()
+    mockSwrFetcher.mockImplementation(() => Promise.resolve(rssArticle))
+  })
+
+  it('shows the Redownload chip (ArrowDownToLine) and the Delete chip (Trash) for RSS articles', () => {
+    renderArticle(rssArticle)
+    expect(findChipButton('svg.lucide-arrow-down-to-line')).not.toBeNull()
+    const deleteChip = findChipButton('svg.lucide-trash')
+    expect(deleteChip).not.toBeNull()
+    expect(deleteChip!.textContent).toContain('Delete')
+  })
+
+  it('calls the redownload API, shows the in-progress state, and clears it when fetched_at changes', async () => {
+    const { unmount } = renderArticle(rssArticle)
+
+    const redownloadChip = findChipButton('svg.lucide-arrow-down-to-line')!
+    fireEvent.click(redownloadChip)
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/api/articles/9/redownload')
+    })
+    // In-progress chip replaces the action chip while polling
+    await waitFor(() => {
+      expect(screen.getByText('Redownloading...')).toBeTruthy()
+    })
+
+    // The polling loop revalidates the article SWR key; once the mocked
+    // server response carries a fresh fetched_at, the in-progress state clears.
+    mockSwrFetcher.mockImplementation(() => Promise.resolve({ ...rssArticle, fetched_at: '2026-03-04 00:05:00' }))
+    await waitFor(() => {
+      expect(screen.queryByText('Redownloading...')).toBeNull()
+    }, { timeout: 8000 })
+
+    unmount()
+  })
+
+  it('shows the RSS soft-hide confirm message on delete for RSS articles', async () => {
+    renderArticle(rssArticle)
+
+    const deleteChip = findChipButton('svg.lucide-trash')!
+    fireEvent.click(deleteChip)
+
+    await waitFor(() => {
+      expect(screen.getByText('Delete this article? It will disappear from your lists and search, and will not come back on the next feed refresh.')).toBeTruthy()
+    })
+  })
+
+  it('shows the plain confirm message for clip articles', async () => {
+    renderArticle({ ...rssArticle, id: 10, feed_type: 'clip', rss_origin: 0 })
+
+    const deleteChip = findChipButton('svg.lucide-trash')!
+    fireEvent.click(deleteChip)
+
+    await waitFor(() => {
+      expect(screen.getByText('Delete this article?')).toBeTruthy()
+    })
+  })
+
+  it('shows the RSS soft-hide confirm message for a resurrected RSS clip', async () => {
+    // A clip that was resurrected from a hidden RSS article keeps its RSS
+    // origin, so it gets the same no-resurrect-on-feed-refresh wording.
+    renderArticle({ ...rssArticle, id: 11, feed_type: 'clip', rss_origin: 1 })
+
+    const deleteChip = findChipButton('svg.lucide-trash')!
+    fireEvent.click(deleteChip)
+
+    await waitFor(() => {
+      expect(screen.getByText('Delete this article? It will disappear from your lists and search, and will not come back on the next feed refresh.')).toBeTruthy()
+    })
   })
 })

@@ -2,9 +2,11 @@ import {
   getEnabledFeeds,
   countStaleArticlesByFeed,
   getArticlesNeedingRefresh,
+  getArticleById,
   getExistingArticleUrls,
   getRetryArticles,
   getRetryStats,
+  getArticleRssExcerpt,
   insertArticle,
   markArticleRefreshAttempted,
   normalizeUrl,
@@ -20,7 +22,7 @@ import {
 import { Semaphore, CONCURRENCY, errorMessage } from './fetcher/util.js'
 import { detectAndStoreSimilarArticles } from './similarity.js'
 import { type FetchProgressEvent, emitProgress, markFeedDone } from './fetcher/progress.js'
-import { fetchFullText, isBotBlockPage, convertHtmlToMarkdown, markdownToExcerpt, MIN_EXTRACTED_LENGTH } from './fetcher/content.js'
+import { fetchFullText, isBotBlockPage, isGarbageExtraction, convertHtmlToMarkdown, markdownToExcerpt, MIN_EXTRACTED_LENGTH } from './fetcher/content.js'
 import { type FetchRssResult, type RssItem, fetchAndParseRss, RateLimitError } from './fetcher/rss.js'
 import { computeInterval, computeEmpiricalInterval, sqliteFuture, DEFAULT_INTERVAL } from './fetcher/schedule.js'
 import { detectLanguage, autoSummarizeArticle, shouldAutoSummarizeNow } from './fetcher/ai.js'
@@ -100,6 +102,8 @@ export interface FetchedContent {
   lastError: string | null
   /** Title extracted by fetchFullText (from OGP etc.) */
   title: string | null
+  /** True when the final fullText came from the RSS listing excerpt rather than the live page. */
+  excerptFallback?: boolean
 }
 
 export async function fetchArticleContent(
@@ -118,6 +122,7 @@ export async function fetchArticleContent(
   let lang: string | null = null
   let lastError: string | null = null
   let title: string | null = null
+  let excerptFallback = false
 
   const existing = options?.existingArticle
 
@@ -133,6 +138,7 @@ export async function fetchArticleContent(
   } else if (isAnchorLink && options?.listingExcerpt) {
     fullText = convertHtmlToMarkdown(options.listingExcerpt)
     excerpt = markdownToExcerpt(fullText)
+    excerptFallback = true
   } else {
     try {
       const result = await fetchFullText(url, { requiresJsChallenge: options?.requiresJsChallenge })
@@ -161,6 +167,7 @@ export async function fetchArticleContent(
         fullText = md
         excerpt = markdownToExcerpt(md)
         lastError = null
+        excerptFallback = true
       }
     }
   }
@@ -172,7 +179,7 @@ export async function fetchArticleContent(
     lang = existing.lang
   }
 
-  return { fullText, ogImage, excerpt, lang, lastError, title }
+  return { fullText, ogImage, excerpt, lang, lastError, title, excerptFallback }
 }
 
 // --- Article processing ---
@@ -222,6 +229,9 @@ async function processArticle(task: ArticleTask): Promise<boolean> {
         excerpt: content.excerpt,
         og_image: content.ogImage,
         last_error: content.lastError,
+        // Keep the original listing excerpt so a later redownload can re-run
+        // the RSS fallback even after the item leaves the live feed.
+        rss_excerpt: task.excerpt ?? null,
       })
       // Fire-and-forget: detect similar articles asynchronously
       void detectAndStoreSimilarArticles(articleId, task.title, task.feed_id, task.published_at)
@@ -254,6 +264,85 @@ async function processArticle(task: ArticleTask): Promise<boolean> {
     }
   }
   return !!content.lastError
+}
+
+// --- Manual redownload (article-level Redownload action) ---
+
+/**
+ * Force re-fetch, re-extract and replace an article's content, running the
+ * same steps a brand-new article goes through at ingestion: derived output
+ * (summary / translation) is cleared because the text it was generated from
+ * is replaced, similarity re-detection fires, and auto-summarization runs
+ * when enabled (captain decision D3). On failure the previous content and
+ * derived output are kept untouched and only `last_error` is recorded — a
+ * failed redownload never destroys a working article.
+ *
+ * Returns true when content was replaced, false on failure or when the
+ * article no longer exists.
+ */
+export async function redownloadArticle(articleId: number): Promise<boolean> {
+  const article = getArticleById(articleId)
+  if (!article) return false
+  log.info({ articleId, url: article.url }, 'redownload: force-fetching article content')
+
+  // A redownload that loses the live page must fall back to the same RSS
+  // listing content the item was ingested from, so the operation is
+  // deterministic even after the item rolls off the feed.
+  const storedExcerpt = getArticleRssExcerpt(articleId)
+
+  // No `existingArticle` passed on purpose: that would skip the network
+  // fetch when full_text is already present (the retry optimization in
+  // fetchArticleContent), which is exactly what a redownload must bypass.
+  // Page fetches are not HTTP-cached (only RSS XML is), so this is fresh.
+  const content = await fetchArticleContent(article.url, {
+    ...(storedExcerpt ? { listingExcerpt: storedExcerpt } : {}),
+  })
+
+  if (
+    !content.fullText ||
+    isBotBlockPage(content.fullText) ||
+    // Long live-page extractions that fail the quality gate (verbose
+    // error/maintenance shells, leaked scripts) must not replace a working
+    // article; genuinely short pages stay exempt so valid micro-posts keep
+    // redownloading. Excerpt-sourced content is authored feed text that the
+    // ingestion pipeline stores verbatim, so it is never garbage-gated.
+    (!content.excerptFallback &&
+      content.fullText.replace(/\s+/g, ' ').trim().length >= MIN_EXTRACTED_LENGTH &&
+      isGarbageExtraction(content.fullText))
+  ) {
+    // Keep old content and derived output; only record the error.
+    updateArticleContent(articleId, {
+      last_error: content.lastError ?? 'redownload: no usable content extracted',
+    })
+    log.warn({ articleId, url: article.url }, 'redownload: fetch failed, keeping previous content')
+    return false
+  }
+
+  updateArticleContent(articleId, {
+    full_text: content.fullText,
+    excerpt: content.excerpt,
+    og_image: content.ogImage,
+    lang: content.lang ?? detectLanguage(content.fullText),
+    summary: null,
+    full_text_translated: null,
+    translated_lang: null,
+    last_error: null,
+    retry_count: 0,
+    // Refresh the fetch timestamp: retention eligibility and the client's
+    // completion poll in useArticleActions both key off it. Match the
+    // SQLite datetime('now') format used elsewhere in the schema.
+    fetched_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+  })
+
+  // Full ingestion pipeline (captain decisions, rounds 6–7): everything a
+  // new article gets, a redownloaded article gets too.
+  void detectAndStoreSimilarArticles(articleId, article.title, article.feed_id, article.published_at)
+  if (shouldAutoSummarizeNow()) {
+    void autoSummarizeArticle(articleId, content.fullText)
+  }
+
+  log.info({ articleId, url: article.url }, 'redownload: content replaced')
+  return true
 }
 
 // --- Single feed fetch ---

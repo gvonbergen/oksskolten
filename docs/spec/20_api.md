@@ -565,6 +565,24 @@ Returns `400` if `full_text` is NULL. Returns `400` if the article is already in
 Query parameter `stream=1` for SSE streaming response (same format as summarize).
 
 
+**POST /api/articles/:id/redownload** — Re-download an article (background job)
+
+Force re-fetch and re-extract an article through the same pipeline a brand-new article goes through (Readability extraction, FlareSolverr / RSS-excerpt fallbacks, language detection). Runs as a background job: it responds `202` immediately and the client polls the article retrieval endpoint until `fetched_at` changes (90 s deadline).
+
+```json
+// Response: 202
+{ "status": "accepted" }
+```
+
+| Status | Condition |
+|---|---|
+| 202 | Background job started |
+| 404 | Article not found |
+| 409 | Redownload already in progress for this article (`code: "REDOWNLOAD_IN_PROGRESS"`) |
+
+On success `full_text` is replaced and `fetched_at` refreshed; the previously generated `summary` / `full_text_translated` are cleared, `last_error` / `retry_count` reset, and the normal ingestion steps re-run (similar-article detection, auto-summarization when enabled). On failure the previous content and derived output are kept and only `last_error` is recorded.
+
+
 **POST /api/articles/from-url** — Clip and save an article from URL
 
 ```json
@@ -575,26 +593,32 @@ Query parameter `stream=1` for SSE streaming response (same format as summarize)
 { "article": { ... }, "created": true }
 ```
 
-`force` is optional. Specify `true` when moving an existing RSS article to clips.
+`force` is optional. Specify `true` when moving an active RSS article to clips.
 
 | Status | Condition |
 |---|---|
 | 201 | Article created successfully |
 | 200 | Existing RSS article moved to clips with `force=true` (`{ "article": {...}, "moved": true }`) |
+| 200 | A soft-deleted (hidden) RSS article is resurrected into the clip feed automatically (`{ "article": {...}, "resurrected": true, "moved": true }`) |
 | 400 | `url` not provided |
 | 409 | Article with the same URL already exists (for clip articles). For RSS feed articles, includes `can_force: true` |
 | 500 | Clip feed not created (should not normally occur) |
 
 Processing flow:
 1. Get the clip feed via `getClipFeed()`
-2. Check for existing article: `409` if already in clips, move or `409` (`can_force: true`) if in an RSS feed depending on `force`
+2. Check for existing article:
+   - Already in clips → `409`
+   - Active RSS article → move with `force=true` or `409` (`.can_force: true`)
+   - Soft-deleted (hidden) RSS article → resurrect into the clip feed (`hidden_at` cleared, row moved, search document re-added)
 3. Fetch content via `fetchFullText(url)` (on failure, record in `last_error` and create the article with `full_text = NULL`)
 4. Detect language via `detectLanguage()`
 5. Title priority: request `title` > page `og:title` > URL hostname
 6. Add the article to the clip feed via `insertArticle()`
 
 
-**DELETE /api/articles/:id** — Delete a clip article
+**DELETE /api/articles/:id** — Delete an article
+
+Removes the article from the UI without an RSS feed being able to re-import it: RSS-origin articles are soft-deleted (hidden), clips are hard-deleted.
 
 ```json
 // Response: 204 (No Content)
@@ -603,10 +627,10 @@ Processing flow:
 | Status | Condition |
 |---|---|
 | 204 | Deleted successfully |
-| 403 | Deleting RSS feed articles is forbidden (`feed_type !== 'clip'`) |
 | 404 | Article not found |
 
-If `images_archived_at` is set, locally archived image files are also deleted.
+- **RSS-origin articles** (tracked by the `rss_origin` marker, which survives reclassification into the clip feed): soft delete. The row is marked `hidden_at` and kept in the base table so the feed poll's duplicate check keeps treating the URL as existing. Hidden rows are excluded from every retrieval API and removed from the search index; retention later hard-purges the tombstone. Archived image files are kept (a re-clip resurrect re-surfaces them; `purgeExpiredArticles` clears the files together with `images_archived_at`).
+- **Clips**: hard delete of the row; if `images_archived_at` is set, locally archived image files are also deleted.
 
 
 **POST /api/articles/:id/archive-images** — Archive images in an article

@@ -269,6 +269,13 @@ export async function demoApiPost(url: string, body?: unknown): Promise<unknown>
     return { text: dt('demo.translateReply'), cached: true }
   }
 
+  // Article redownload — deterministically bump fetched_at so the client's
+  // completion poll succeeds without network access.
+  const redownloadId = extractId(path, /^\/api\/articles\/(\d+)\/redownload$/)
+  if (redownloadId != null) {
+    return demoStore.redownloadArticle(redownloadId)
+  }
+
   // Chat — handled via streamPostChat
   if (path.startsWith('/api/chat')) {
     return {}
@@ -349,6 +356,12 @@ export async function demoApiDelete(url: string): Promise<unknown> {
   const catId = extractId(path, /^\/api\/categories\/(\d+)$/)
   if (catId != null) {
     return demoStore.deleteCategory(catId)
+  }
+
+  // /api/articles/:id
+  const articleId = extractId(path, /^\/api\/articles\/(\d+)$/)
+  if (articleId != null) {
+    return demoStore.deleteArticle(articleId)
   }
 
   return {}

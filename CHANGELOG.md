@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.5.1](https://github.com/babarot/oksskolten/compare/v0.5.0...v0.5.1) - Unreleased
+### New Features
+- feat(articles): article-level Redownload action (force re-fetch through the full ingestion pipeline, 202 + background job with client polling) and delete for all articles — clips hard-delete, RSS articles soft-hide so feed polls never resurrect them
+
 ## [v0.5.0](https://github.com/babarot/oksskolten/compare/v0.4.2...v0.5.0) - 2026-06-08
 ### New Features
 - feat: add support for vLLM LLM provider by @pju-hoge in https://github.com/babarot/oksskolten/pull/56

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setupTestDb } from '../__tests__/helpers/testDb.js'
 import { buildApp } from '../__tests__/helpers/buildApp.js'
-import { createFeed, insertArticle, ensureClipFeed, getArticleById, markImagesArchived, markArticleSeen, upsertSetting } from '../db.js'
+import { createFeed, insertArticle, ensureClipFeed, getArticleById, markImagesArchived, markArticleSeen, upsertSetting, getDb } from '../db.js'
 import { buildMeiliDoc } from '../db/articles.js'
 import type { FastifyInstance } from 'fastify'
 import path from 'node:path'
@@ -328,6 +328,78 @@ describe('POST /api/articles/from-url', () => {
     expect(res.json().error).toMatch(/clip feed/i)
   })
 
+  it('200: re-clipping a hidden RSS article resurrects the existing row into the clip feed', async () => {
+    const clipFeed = ensureClipFeed()
+    const rssFeed = seedFeed()
+    // RSS article exists; delete soft-hides it.
+    const artId = seedArticle(rssFeed.id, { url: 'https://blog.example.com/hidden-then-reclip', full_text: 'RSS body' })
+
+    const del = await app.inject({ method: 'DELETE', url: `/api/articles/${artId}` })
+    expect(del.statusCode).toBe(204)
+    // Hidden → invisible to retrievers, so a fresh clip does not 409.
+    const byUrl = await app.inject({ method: 'GET', url: `/api/articles/by-url?url=${encodeURIComponent('https://blog.example.com/hidden-then-reclip')}` })
+    expect(byUrl.statusCode).toBe(404)
+
+    // Re-clip without force: the hidden row is resurrected into the clip feed.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/articles/from-url',
+      headers: json,
+      payload: { url: 'https://blog.example.com/hidden-then-reclip' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.resurrected).toBe(true)
+    expect(body.article.id).toBe(artId)
+    expect(body.article.feed_id).toBe(clipFeed.id)
+    // No duplicate row was inserted (articles.url is UNIQUE).
+    const dupCount = getDb().prepare('SELECT COUNT(*) AS c FROM articles WHERE url = ?').get('https://blog.example.com/hidden-then-reclip') as { c: number }
+    expect(dupCount.c).toBe(1)
+    // The row is visible again: by-url now resolves.
+    const after = await app.inject({ method: 'GET', url: `/api/articles/by-url?url=${encodeURIComponent('https://blog.example.com/hidden-then-reclip')}` })
+    expect(after.statusCode).toBe(200)
+    expect(after.json().id).toBe(artId)
+  })
+
+  it('deleting a resurrected RSS article soft-hides it again instead of hard-deleting the tombstone', async () => {
+    ensureClipFeed()
+    const rssFeed = seedFeed()
+    const url = 'https://blog.example.com/resurrected-then-deleted'
+    const artId = seedArticle(rssFeed.id, { url, full_text: 'RSS body' })
+
+    // First delete: RSS article is soft-hidden.
+    const del1 = await app.inject({ method: 'DELETE', url: `/api/articles/${artId}` })
+    expect(del1.statusCode).toBe(204)
+
+    // Re-clip: the hidden row is resurrected into the clip feed.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/articles/from-url',
+      headers: json,
+      payload: { url },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().article.feed_type).toBe('clip')
+
+    // Second delete: despite living in the clip feed now, the row's RSS
+    // origin is preserved, so this is a soft-hide, not a hard delete — the
+    // feed-poll tombstone (the row itself) must survive.
+    const del2 = await app.inject({ method: 'DELETE', url: `/api/articles/${artId}` })
+    expect(del2.statusCode).toBe(204)
+
+    const row = getDb().prepare('SELECT hidden_at, rss_origin FROM articles WHERE id = ?').get(artId) as { hidden_at: string | null; rss_origin: number }
+    expect(row.rss_origin).toBe(1)
+    expect(row.hidden_at).not.toBeNull()
+    // Still exactly one row: the duplicate-check tombstone was preserved, so
+    // the original feed cannot re-import the twice-deleted URL.
+    const rowCount = getDb().prepare('SELECT COUNT(*) AS c FROM articles WHERE url = ?').get(url) as { c: number }
+    expect(rowCount.c).toBe(1)
+    // And it is invisible to retrieval again.
+    const byUrl = await app.inject({ method: 'GET', url: `/api/articles/by-url?url=${encodeURIComponent(url)}` })
+    expect(byUrl.statusCode).toBe(404)
+  })
+
   it('500: clip feed not found', async () => {
     // Do NOT call ensureClipFeed — no clip feed exists
     const res = await app.inject({
@@ -374,7 +446,7 @@ describe('DELETE /api/articles/:id', () => {
     expect(mockDeleteArticleImages).toHaveBeenCalledWith(artId)
   })
 
-  it('403: rejects deletion of RSS feed articles', async () => {
+  it('204: RSS article delete soft-hides instead of hard delete', async () => {
     const feed = seedFeed()
     const artId = seedArticle(feed.id)
 
@@ -383,8 +455,35 @@ describe('DELETE /api/articles/:id', () => {
       url: `/api/articles/${artId}`,
     })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.json().error).toMatch(/clip/i)
+    expect(res.statusCode).toBe(204)
+    // Soft-hide semantics: retrieval APIs treat the article as absent...
+    expect(getArticleById(artId)).toBeUndefined()
+    // ...but the row stays (with hidden_at set) so the feed poll's
+    // duplicate check never re-inserts it.
+    const row = getDb().prepare('SELECT hidden_at FROM articles WHERE id = ?').get(artId) as { hidden_at: string | null }
+    expect(row.hidden_at).not.toBeNull()
+  })
+
+  it('204: RSS article soft-delete keeps archived image files for the resurrection path', async () => {
+    const feed = seedFeed()
+    const artId = seedArticle(feed.id, { url: 'https://example.com/rss-with-images' })
+    markImagesArchived(artId)
+    mockDeleteArticleImages.mockClear()
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/articles/${artId}`,
+    })
+
+    expect(res.statusCode).toBe(204)
+    // Soft-hide keeps the row and its image files: the row can be
+    // resurrected again (images intact) and the tombstone's cleanup is the
+    // retention purge's job (which deletes files AND nulls
+    // images_archived_at together).
+    expect(mockDeleteArticleImages).not.toHaveBeenCalled()
+    const row = getDb().prepare('SELECT hidden_at, images_archived_at FROM articles WHERE id = ?').get(artId) as { hidden_at: string | null; images_archived_at: string | null }
+    expect(row.hidden_at).not.toBeNull()
+    expect(row.images_archived_at).not.toBeNull()
   })
 
   it('404: article not found', async () => {

@@ -3,6 +3,7 @@ import { setupTestDb } from '../__tests__/helpers/testDb.js'
 import {
   getArticles,
   getArticleById,
+  getArticleByUrl,
   insertArticle,
   getReadingStats,
   searchArticles,
@@ -14,6 +15,12 @@ import {
   recalculateScores,
   getRetryArticles,
   getRetryStats,
+  hideArticle,
+  getExistingArticleUrls,
+  getArticlesNeedingRefresh,
+  countStaleArticlesByFeed,
+  getSummaryCounts,
+  getArticlesMissingSummaries,
 } from '../db.js'
 import { createFeed, createCategory, getDb } from '../db.js'
 import { buildMeiliDoc, stripMeiliDocMetadata } from './articles.js'
@@ -872,5 +879,81 @@ describe('getRetryStats', () => {
     expect(stats.eligible).toBe(1)
     expect(stats.backoff_waiting).toBe(1)
     expect(stats.exceeded).toBe(1)
+  })
+})
+
+// --- hideArticle: RSS delete soft-hide semantics (D1-C) ---
+
+describe('hideArticle', () => {
+  it('sets hidden_at and excludes the row from every retrieval path', () => {
+    const feed = seedFeed()
+    const id = seedArticle(feed.id, { url: 'https://example.com/hide-me', full_text: 'Body text' })
+
+    expect(hideArticle(id)).toBe(true)
+
+    // Hidden_at is set on the base row...
+    const row = getDb().prepare('SELECT hidden_at FROM articles WHERE id = ?').get(id) as { hidden_at: string | null }
+    expect(row.hidden_at).not.toBeNull()
+
+    // ...but every retrieval API treats the article as absent.
+    expect(getArticleById(id)).toBeUndefined()
+    expect(getArticleByUrl('https://example.com/hide-me')).toBeUndefined()
+    const list = getArticles({ limit: 100, offset: 0 })
+    expect(list.articles.find(a => a.id === id)).toBeUndefined()
+  })
+
+  it('keeps the row visible to the feed-poll duplicate check (no resurrection)', () => {
+    const feed = seedFeed()
+    const url = 'https://example.com/still-known'
+    const id = seedArticle(feed.id, { url })
+
+    hideArticle(id)
+
+    // getExistingArticleUrls reads the base table: the hidden article must
+    // still count as existing so the next feed poll does not re-insert it.
+    const existing = getExistingArticleUrls([url])
+    expect(existing.has(url)).toBe(true)
+    expect(id).toBeGreaterThan(0)
+  })
+
+  it('returns false for unknown articles', () => {
+    expect(hideArticle(999999)).toBe(false)
+  })
+
+  it('stops rendering a Meilisearch document once hidden', () => {
+    const feed = seedFeed()
+    const id = seedArticle(feed.id, { url: 'https://example.com/hide-search', full_text: 'Body text', summary: 'A summary' })
+
+    expect(buildMeiliDoc(id)).not.toBeNull()
+    hideArticle(id)
+    expect(buildMeiliDoc(id)).toBeNull()
+    // Post-hide content updates must stay a search-index no-op: the
+    // updateArticleContent sync is gated on buildMeiliDoc returning a doc.
+    updateArticleContent(id, { summary: 'Updated after hide' })
+    expect(buildMeiliDoc(id)).toBeNull()
+  })
+
+  it('excludes hidden articles from the stale-refresh maintenance scans', () => {
+    const feed = seedFeed()
+    const visibleShort = seedArticle(feed.id, { url: 'https://example.com/visible-short', full_text: 'tiny' })
+    const hiddenShort = seedArticle(feed.id, { url: 'https://example.com/hidden-short', full_text: 'tiny' })
+    hideArticle(hiddenShort)
+
+    expect(countStaleArticlesByFeed(feed.id, 200)).toBe(1)
+    const toRefresh = getArticlesNeedingRefresh(feed.id, 200)
+    expect(toRefresh.map(a => a.id)).toEqual([visibleShort])
+    expect(toRefresh.some(a => a.id === hiddenShort)).toBe(false)
+  })
+
+  it('excludes hidden articles from the summarizable population', () => {
+    const feed = seedFeed()
+    const visible = seedArticle(feed.id, { url: 'https://example.com/visible-sum', full_text: 'Body text long enough to be summarizable article content' })
+    const hidden = seedArticle(feed.id, { url: 'https://example.com/hidden-sum', full_text: 'Another body text long enough to be summarizable article content' })
+    hideArticle(hidden)
+
+    const counts = getSummaryCounts()
+    expect(counts.total).toBe(1)
+    expect(counts.summarized).toBe(0)
+    expect(getArticlesMissingSummaries(10).map(a => a.id)).toEqual([visible])
   })
 })

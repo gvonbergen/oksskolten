@@ -27,7 +27,7 @@ Clipped articles belong to a special singleton feed called the "clip feed." This
 | Global unread count | Included | Not included |
 | Category | Can belong to one | Not allowed |
 | Smart Floor | Applied | Not applied (all saved articles always visible) |
-| Article deletion | Not allowed (403) | Allowed (`DELETE /api/articles/:id`) |
+| Article deletion | Soft-hide: delete marks `hidden_at` (row kept for the feed-poll dup check, excluded from retrieval and search; retention purges it later) | Hard delete (`DELETE /api/articles/:id`) |
 | Feed deletion | Allowed | Not allowed (403) |
 | Icon | Domain favicon | Archive icon |
 
@@ -38,7 +38,8 @@ Clipped articles belong to a special singleton feed called the "clip feed." This
 | `ensureClipFeed()` | Retrieves the clip feed. Creates and returns it if it does not exist (idempotent) |
 | `getClipFeed()` | Retrieves the clip feed. Returns `undefined` if not yet created |
 | `getEnabledFeeds()` | Returns only feeds where `disabled = 0 AND type = 'rss'` (excludes clip) |
-| `deleteArticle(id)` | Deletes an article. Returns `true` on success, `false` if not found |
+| `deleteArticle(id)` | Hard-deletes an article (clip delete). Returns `true` on success, `false` if not found |
+| `hideArticle(id)` | Soft-deletes an RSS-origin article (sets `hidden_at`; RSS delete). Returns `true` on success, `false` if not found |
 
 ### Clip Save Flow
 
